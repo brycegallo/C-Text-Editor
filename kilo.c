@@ -1,19 +1,37 @@
+/*** includes ***/
 #include <ctype.h> // gives us: iscntrl()
-#include <stdio.h> // gives us: printf()
-#include <stdlib.h> // gives us: atexit()
-#include <termios.h>  // gives us: struct termios, tcgetattr(), tcsetattr(), ECHO, ICANON, ICRNL, IXTEN, ISIG, IXON, TCSAFLUSH, and also BRKINT, INPCK, ISTRIP, and CS8
+#include <errno.h> // gives us: EAGAIN and errno
+#include <stdio.h> // gives us: perror(), printf()
+#include <stdlib.h> // gives us: atexit(), exit()
+#include <termios.h>  // gives us: struct termios, tcgetattr(), tcsetattr(), ECHO, ICANON, ICRNL, IXTEN, ISIG, IXON, TCSAFLUSH, and also BRKINT, INPCK, ISTRIP, and CS8. also VMIN and VTIME
 #include <unistd.h> // gives us: standard symbolic constants and types
+
+/*** data ***/
 
 // here we store the original terminal attributes in a global variale
 struct termios orig_termios;
 
+/*** terminal ***/
+
+void die(const char *s) {
+    // most C library functions that fail will set the global errno value to indicate the error
+    // perror will look at errno and print a descriptive error message for its value
+    perror(s);
+    // exiting with an exit status of 1 (or any other non-zero value) indicates failure
+    exit(1);
+}
+
 void disableRawMode(void) {
-    tcsetattr(STDIN_FILENO, TCSAFLUSH, &orig_termios);
+    // run tcsetattr() with those arguments and return an error with die() if it fails
+    if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &orig_termios) == -1) {
+        die("tcsetattr");
+    }
 }
 
 void enableRawMode(void) {
     // we use tcgetattr() here to read current attributes into a struct
-    tcgetattr(STDIN_FILENO, &orig_termios);
+    // call die() if it fails
+    if (tcgetattr(STDIN_FILENO, &orig_termios) == -1) die("tcgetattr");
     atexit(disableRawMode);
 
     // struct we create
@@ -41,27 +59,52 @@ void enableRawMode(void) {
     // by turning off ISIG we can have ctrl-c functionality without stopping or suspending the program
     raw.c_lflag &= ~(ECHO | ICANON | IEXTEN | ISIG);
 
+    // VMIN sets the minimum number of bytes of input before read() can return
+    raw.c_cc[VMIN] = 0;
+    // VTIME sets the minimum amount of time before read() can return, in tenths of a second
+    raw.c_cc[VTIME] = 1;
+
     // here we pass the modified struct to tcsetattr() to write the new terminal attributes back out
     // // TCSAFLUSH argument specifies when to apply the change
     // // // in this case, it waits for all pending output to be written to the terminal, and discards an unread input
-    tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw);
+    if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw) == -1) die("tcsetattr");
 }
+
+/*** init ***/
 
 int main() {
     enableRawMode();
 
-    char c;
-    // while loop will read 1 byte from standard input into char c until there are no more bytes left to read
-    // // read returns the number of bytes that it read, and returns 0 when it reaches the end of a file
-    // // // terminal by default starts in canonical (cooked) mode where keyboard input is only sent to your program when user hits Enter. We want to change to raw mode by turning off certain flags in the terminal
-    while (read(STDIN_FILENO, &c, 1) == 1 && c != 'q') {
-        // we now have to manually add in \r for carriage returns because we disabled that above
+    // commenting out a lot of code which will still be useful to look at later
+    // char c;
+    // // while loop will read 1 byte from standard input into char c until there are no more bytes left to read
+    // // // read returns the number of bytes that it read, and returns 0 when it reaches the end of a file
+    // // // // terminal by default starts in canonical (cooked) mode where keyboard input is only sent to your program when user hits Enter. We want to change to raw mode by turning off certain flags in the terminal
+    // while (read(STDIN_FILENO, &c, 1) == 1 && c != 'q') {
+    //     // we now have to manually add in \r for carriage returns because we disabled that above
+    //     if (iscntrl(c)) {
+    //         // if a character is a control characcter, it won't be printable to the screen, but its ASCII value will be printed here
+    //         printf("%d\r\n", c);
+    //     } else {
+    //         // prints out a non-control character and its ASCII value
+    //         printf("%d ('%c')'\r\n", c, c);
+    //     }
+    // }
+
+    // the following code modifies the preceding code
+    while (1) {
+        char c = '\0';
+        // EAGAIN is the errno value given by Cygwin when read() times out, so we won't treat it as an error
+        if (read(STDIN_FILENO, &c, 1) == -1 && errno != EAGAIN) die("read");
         if (iscntrl(c)) {
-            // if a character is a control characcter, it won't be printable to the screen, but its ASCII value will be printed here
             printf("%d\r\n", c);
         } else {
-            // prints out a non-control character and its ASCII value
             printf("%d ('%c')'\r\n", c, c);
+        }
+        // following 3 lines can be rewritten as:
+        // if (c == 'q') break;
+        if (c == 'q') {
+            break;
         }
     }
 
