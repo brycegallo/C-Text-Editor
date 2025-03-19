@@ -3,7 +3,7 @@
 #include <errno.h> // gives us: EAGAIN and errno
 #include <stdio.h> // gives us: perror(), printf(), snprintf(), sscanf()
 #include <stdlib.h> // gives us: atexit(), exit(), free(), and realloc()
-#include <string.h> // gives us: memcpy()
+#include <string.h> // gives us: memcpy(), strlen()
 #include <sys/ioctl.h> // gives us icoctl(), TIOCGWINSZ, struct winsize
 #include <termios.h>  // gives us: struct termios, tcgetattr(), tcsetattr(), ECHO, ICANON, ICRNL, IXTEN, ISIG, IXON, TCSAFLUSH, and also BRKINT, INPCK, ISTRIP, and CS8. also VMIN and VTIME
 #include <unistd.h> // gives us: standard symbolic constants and types, also write() and STDOUT_FILENO
@@ -17,12 +17,22 @@
 // // in C bitmasks are generally specified with hexadecimal, because C doesn't have binary literals
 #define CTRL_KEY(k) ((k) & 0x1f)
 
+// Here we give a representation for the arrows that doesn't conflict with w,a,s,d or any other chars, so we'll use ints that are out of char's range
+// // by setting the first constant in the enum to 1000, the rest get incrementing values of 1001, 1002, 1003, etc
+enum editorKey {
+    ARROW_LEFT = 1000,
+    ARROW_RIGHT,
+    ARROW_UP,
+    ARROW_DOWN
+};
+
 /*** data ***/
 
 // a global struct that will contain our editor state
 struct editorConfig {
-    int screenrows;
-    int screencols;
+    int cx, cy; // variables for holding cursor column and row location
+    int screenrows; // variable for screen height
+    int screencols; // variable for screen width
     // here we store the original terminal attributes in a global variable
     struct termios orig_termios;
 };
@@ -93,13 +103,34 @@ void enableRawMode(void) {
 }
 
 // this function waits for one keypress and returns it
-char editorReadKey(void) {
+int editorReadKey(void) {
     int nread;
     char c;
     while ((nread = read(STDIN_FILENO, &c, 1)) != 1) {
         if (nread == -1 && errno != EAGAIN) die("read");
     }
-    return c;
+
+    if (c == '\x1b') {
+        // we make the seq buffer 3 bytes long to handle longer escape sequences in the future
+        char seq[3];
+
+        // each of these read()s will time out after 0.1 seconds, which is long enough for the near instantaneous escape sequences produced by arrow key presses to trigger them, but will otherwise assume the user just pressed the Escape key and return that
+        if (read(STDIN_FILENO, &seq[0], 1) != 1) return '\x1b';
+        if (read(STDIN_FILENO, &seq[1], 1) != 1) return '\x1b';
+
+        if (seq[0] == '[') {
+            switch (seq[1]) {
+                case 'A': return ARROW_UP;
+                case 'B': return ARROW_DOWN;
+                case 'C': return ARROW_RIGHT;
+                case 'D': return ARROW_LEFT;
+            }
+        }
+
+        return '\x1b';
+    } else {
+        return c;
+    }
 }
 
 // this function is just fallback method in case the getWindowSize() method doesn't work on some system
@@ -222,7 +253,11 @@ void editorRefreshScreen(void) {
 
     editorDrawRows(&ab);
 
-    abAppend(&ab, "\x1b[H", 3);
+    char buf[32];
+    // here the H command specifies the exact position we want the cursor to move to
+    snprintf(buf, sizeof(buf), "\x1b[%d;%dH", E.cy + 1, E.cx + 1);
+    abAppend(&ab, buf, strlen(buf));
+
     // this should un-hide the cursor after the screen is drawn
     abAppend(&ab, "\x1b[?25h", 6);
 
@@ -233,9 +268,29 @@ void editorRefreshScreen(void) {
 
 /*** input ***/
 
+// Here we make it so that pressing a or d decrements or decrements E.cx to move the cursor left or right
+// pressing w or s decrements or decrements E.cy to move the cursor up or down
+
+void editorMoveCursor(int key) {
+    switch (key) {
+        case ARROW_LEFT:
+            E.cx--;
+            break;
+        case ARROW_RIGHT:
+            E.cx++;
+            break;
+        case ARROW_UP:
+            E.cy--;
+            break;
+        case ARROW_DOWN:
+            E.cy++;
+            break;
+    }
+}
+
 // this function waits for a keypress, then handles it
 void editorProcessKeypress(void) {
-    char c = editorReadKey();
+    int c = editorReadKey();
 
     switch (c) {
         case CTRL_KEY('q'):
@@ -244,12 +299,21 @@ void editorProcessKeypress(void) {
             write(STDIN_FILENO, "\x1b[H", 3);
             exit(0);
             break;
+
+        case ARROW_UP:
+        case ARROW_DOWN:
+        case ARROW_LEFT:
+        case ARROW_RIGHT:
+            editorMoveCursor(c);
+            break;
     }
 }
 
 /*** init ***/
 
 void initEditor() {
+    E.cx = 0;
+    E.cy = 0;
     if (getWindowSize(&E.screenrows, &E.screencols) == -1) die("getWindowSize");
 }
 
