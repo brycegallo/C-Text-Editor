@@ -1,10 +1,17 @@
 /*** includes ***/
+// feature test macros may need to be defined here for getline(), for example
+// // macros are added above our includes, because the header files we're including use the macros to decide which features to expose
+#define _DEFAULT_SOURCE
+#define _BSD_SOURCE
+#define _GNU_SOURCE
+
 #include <ctype.h> // gives us: iscntrl()
 #include <errno.h> // gives us: EAGAIN and errno
-#include <stdio.h> // gives us: perror(), printf(), snprintf(), sscanf()
-#include <stdlib.h> // gives us: atexit(), exit(), free(), and realloc()
+#include <stdio.h> // gives us: FILE, fopen(), getline(), perror(), printf(), snprintf(), sscanf()
+#include <stdlib.h> // gives us: atexit(), exit(), free(), malloc(), realloc()
 #include <string.h> // gives us: memcpy(), strlen()
 #include <sys/ioctl.h> // gives us icoctl(), TIOCGWINSZ, struct winsize
+#include <sys/types.h> // gives us ssize_t
 #include <termios.h>  // gives us: struct termios, tcgetattr(), tcsetattr(), ECHO, ICANON, ICRNL, IXTEN, ISIG, IXON, TCSAFLUSH, and also BRKINT, INPCK, ISTRIP, and CS8. also VMIN and VTIME
 #include <unistd.h> // gives us: standard symbolic constants and types, also write() and STDOUT_FILENO
 
@@ -33,13 +40,21 @@ enum editorKey {
 
 /*** data ***/
 
+// erow here stands for "editor row" and stores a line of text as a pointer to the dynamically-allocated character data and a length. the typedef lets us refer to the type as erow instead of struct erow
+typedef struct erow {
+    int size;
+    char *chars;
+} erow;
+
 // a global struct that will contain our editor state
 struct editorConfig {
     int cx, cy; // variables for holding cursor column and row location
+    int rowoff; // row offset to keep track of which row of the file the user is currently scrolled to
     int screenrows; // variable for screen height
     int screencols; // variable for screen width
-    // here we store the original terminal attributes in a global variable
-    struct termios orig_termios;
+    int numrows;
+    erow *row; 
+    struct termios orig_termios; // here we store the original terminal attributes in a global variable
 };
 
 struct editorConfig E;
@@ -200,6 +215,46 @@ int getWindowSize(int *rows, int *cols) {
     }
 }
 
+/*** row operations ***/
+
+void editorAppendRow(char *s, size_t len) {
+    E.row = realloc(E.row, sizeof(erow) * (E.numrows + 1));
+
+    int at = E.numrows;
+    E.row[at].size = len;
+    E.row[at].chars = malloc(len + 1);
+    memcpy(E.row[at].chars, s, len);
+    E.row[at].chars[len] = '\0';
+    E.numrows++;
+}
+
+/*** file i/o ***/
+
+// editorOpen() will eventually be for opening and reading a file from disk, so we put this in a new section
+void editorOpen(char *filename) {
+    FILE *fp = fopen(filename, "r");
+    if (!fp) die ("fopen");
+
+    char *line = NULL;
+    size_t linecap = 0;
+    ssize_t linelen;
+    // getline is useful for reading lines from a file when we don't know how much memory to allocate for each line. it takes care of memory management for us
+    // first we pass it a NULL line pointer and a linecap (line capacity) of 0. that makes it allocate new memory for the next line it reads, and set line to point to the memory, and set linecap to let us know how much memory it allocated
+    // // its return value is the length of the line it read, or -1 if it's at the end of file and there are no more lines to read
+    linelen = getline(&line, &linecap, fp);
+    if (linelen != -1) {
+        // we also strip off the newline or carriage return at the end of the line before copying it into our erow. we know each erow represents one line of text, so we don't need to store a newline character at the end
+        while ((linelen = getline(&line, &linecap, fp)) != -1) {
+            while (linelen > 0 && (line[linelen - 1] == '\n' || line[linelen - 1] == '\r')) {
+                linelen--;
+            }
+            editorAppendRow(line, linelen);
+        }
+    }
+    free(line);
+    fclose(fp);
+}
+
 /*** append buffer ***/
 
 // rather than make many calls to write() for the many lines of the terminal window, we want to add a line buffer to the tildes and write them all at once when the window is refreshed
@@ -232,24 +287,42 @@ void abFree(struct abuf *ab) {
 
 /*** output ***/
 
+void editorScroll(void) {
+    if (E.cy < E.rowoff) {
+        E.rowoff = E.cy;
+    }
+    if (E.cy >= E.rowoff + E.screenrows) {
+        E.rowoff = E.cy - E.screenrows + 1;
+    }
+}
+
 void editorDrawRows(struct abuf *ab) {
     int y;
     // this prints out tildes at the beginning of each row
     for (y = 0; y < E.screenrows; y++) {
-        if (y == E.screenrows / 3) {
-            char welcome[80];
-            int welcomelen = snprintf(welcome, sizeof(welcome), "Kilo editor -- version %s", KILO_VERSION);
-            // we truncate the length of the string in case the terminal is too small to fit the welcome message
-            if (welcomelen > E.screencols) welcomelen = E.screencols;
-            int padding = (E.screencols - welcomelen) / 2;
-            if (padding) {
+        // this outer if-statement checks whether we are currently drawing a row that is part of of the text buffer, or a row that comes after the end of the text buffer
+        // to draw a row that's part of the text buffer, we write out the chars field of the erow, but first we truncate the rendered line if it would go past the end of the screen
+        int filerow = y + E.rowoff;
+        if (filerow >= E.numrows) {
+            if (E.numrows == 0 && y == E.screenrows / 3) {
+                char welcome[80];
+                int welcomelen = snprintf(welcome, sizeof(welcome), "Kilo editor -- version %s", KILO_VERSION);
+                // we truncate the length of the string in case the terminal is too small to fit the welcome message
+                if (welcomelen > E.screencols) welcomelen = E.screencols;
+                int padding = (E.screencols - welcomelen) / 2;
+                if (padding) {
+                    abAppend(ab, "~", 1);
+                    padding--;
+                }
+                while (padding--) abAppend(ab, " ", 1);
+                abAppend(ab, welcome, welcomelen);
+            } else {
                 abAppend(ab, "~", 1);
-                padding--;
             }
-            while (padding--) abAppend(ab, " ", 1);
-            abAppend(ab, welcome, welcomelen);
         } else {
-            abAppend(ab, "~", 1);
+            int len = E.row[filerow].size;
+            if (len > E.screencols) len = E.screencols;
+            abAppend(ab, E.row[filerow].chars, len);
         }
 
         // this is to clear each line as it is redrawn, rather than clearing the entire screen before each refresh
@@ -263,6 +336,7 @@ void editorDrawRows(struct abuf *ab) {
 }
 
 void editorRefreshScreen(void) {
+    editorScroll();
     // here we initialize a new abuf, ab, by assigning ABUF_INIT to it. we replace each occurrence of write(STDOUT_FILENO, ...) with abAppend(&ab, ...). we also pass ab into editorDrawRows(), so it can use abAppend() too. lastly, we write() the buffer's contents out to standard output, then ffree the memory used by the abuf
     struct abuf ab = ABUF_INIT;
     // this will clear the screen after each keypress. we are writing an escape sequence. 27, followed by [, then J which clears the screen with the argument 2, which clears the entire screen. 1 would clear it up to where the cursor is. 0 would clear it from the cursor up to the end of the screen, and 0 is the default argument
@@ -282,7 +356,7 @@ void editorRefreshScreen(void) {
 
     char buf[32];
     // here the H command specifies the exact position we want the cursor to move to
-    snprintf(buf, sizeof(buf), "\x1b[%d;%dH", E.cy + 1, E.cx + 1);
+    snprintf(buf, sizeof(buf), "\x1b[%d;%dH", (E.cy - E.rowoff) + 1, E.cx + 1);
     abAppend(&ab, buf, strlen(buf));
 
     // this should un-hide the cursor after the screen is drawn
@@ -317,7 +391,7 @@ void editorMoveCursor(int key) {
             }
             break;
         case ARROW_DOWN:
-            if (E.cy != E.screenrows - 1) {
+            if (E.cy < E.numrows) {
                 E.cy++;
             }
             break;
@@ -369,13 +443,23 @@ void editorProcessKeypress(void) {
 void initEditor() {
     E.cx = 0;
     E.cy = 0;
+    E.rowoff = 0;
+    E.numrows = 0; // at first the editor will only display a single line of text, and so numrows can be either 0 or 1, we'll initialize it to 0 here
+    E.row = NULL; // we'll make this a dynamically-allocated array of erow structs, initalized to NULL
+
     if (getWindowSize(&E.screenrows, &E.screencols) == -1) die("getWindowSize");
 }
 
-int main() {
+int main(int argc, char *argv[]) {
     enableRawMode();
     // initEditor will initialize all the fields in the E struct
     initEditor();
+    // we allow the user to choose a file to open by checking if they passed a filename as a command line argument
+    // if they did not, we run with no arguments and editorOpen() will not be called, so they'll start with a blank file
+    if (argc >= 2) {
+        // if they did pass a filename as a command line argument, we call editorOpen() and pass it that filename
+        editorOpen(argv[1]);
+    }
 
     // commenting out a lot of code which will still be useful to look at later
     // char c;
