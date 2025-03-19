@@ -1,7 +1,7 @@
 /*** includes ***/
 #include <ctype.h> // gives us: iscntrl()
 #include <errno.h> // gives us: EAGAIN and errno
-#include <stdio.h> // gives us: perror(), printf(), sscanf()
+#include <stdio.h> // gives us: perror(), printf(), snprintf(), sscanf()
 #include <stdlib.h> // gives us: atexit(), exit(), free(), and realloc()
 #include <string.h> // gives us: memcpy()
 #include <sys/ioctl.h> // gives us icoctl(), TIOCGWINSZ, struct winsize
@@ -9,6 +9,8 @@
 #include <unistd.h> // gives us: standard symbolic constants and types, also write() and STDOUT_FILENO
 
 /*** defines ***/
+
+#define KILO_VERSION "0.0.1"
 
 // the CTRL_KEY macro bitwise-ANDS a character with the value 00011111, essentially setting the upper 3 bits to 0, mirroring what the Ctrl key does in the terminal
 // // the ASCII character set seems designed this way on purpose. Similarly it is designed so that you can set and clear bit 5 to switch between lowercase and uppercase
@@ -176,7 +178,21 @@ void editorDrawRows(struct abuf *ab) {
     int y;
     // this prints out tildes at the beginning of each row
     for (y = 0; y < E.screenrows; y++) {
-        abAppend(ab, "~", 1);
+        if (y == E.screenrows / 3) {
+            char welcome[80];
+            int welcomelen = snprintf(welcome, sizeof(welcome), "Kilo editor -- version %s", KILO_VERSION);
+            // we truncate the length of the string in case the terminal is too small to fit the welcome message
+            if (welcomelen > E.screencols) welcomelen = E.screencols;
+            int padding = (E.screencols - welcomelen) / 2;
+            if (padding) {
+                abAppend(ab, "~", 1);
+                padding--;
+            }
+            while (padding--) abAppend(ab, " ", 1);
+            abAppend(ab, welcome, welcomelen);
+        } else {
+            abAppend(ab, "~", 1);
+        }
 
         // this is to clear each line as it is redrawn, rather than clearing the entire screen before each refresh
         // // the K command erease part of the current line, with a default argument of 0 erasing the part of the line to the right of the cursor, since we want that here, we leave out the 0 and just use <esc>[K
