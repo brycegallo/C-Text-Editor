@@ -50,6 +50,7 @@ typedef struct erow {
 struct editorConfig {
     int cx, cy; // variables for holding cursor column and row location
     int rowoff; // row offset to keep track of which row of the file the user is currently scrolled to
+    int coloff; // like rowoff but for columns
     int screenrows; // variable for screen height
     int screencols; // variable for screen width
     int numrows;
@@ -207,7 +208,7 @@ int getWindowSize(int *rows, int *cols) {
         // if ioctl() doesn't work properly, as may be the case on some systems, we move the cursor to the bottom-right of the screen, then use escape sequences that let us query the the position of the cursor. this code moves the cursor to the bottom-right of the screen
         if (write(STDOUT_FILENO, "\x1b[999C\x1b[999B", 12) != 12) return -1;
         return getCursorPosition(rows, cols);
-        return -1;
+        // return -1; // i think i left this here by mistake
     } else {
         *cols = ws.ws_col;
         *rows = ws.ws_row;
@@ -241,16 +242,13 @@ void editorOpen(char *filename) {
     // getline is useful for reading lines from a file when we don't know how much memory to allocate for each line. it takes care of memory management for us
     // first we pass it a NULL line pointer and a linecap (line capacity) of 0. that makes it allocate new memory for the next line it reads, and set line to point to the memory, and set linecap to let us know how much memory it allocated
     // // its return value is the length of the line it read, or -1 if it's at the end of file and there are no more lines to read
-    linelen = getline(&line, &linecap, fp);
-    if (linelen != -1) {
-        // we also strip off the newline or carriage return at the end of the line before copying it into our erow. we know each erow represents one line of text, so we don't need to store a newline character at the end
-        while ((linelen = getline(&line, &linecap, fp)) != -1) {
-            while (linelen > 0 && (line[linelen - 1] == '\n' || line[linelen - 1] == '\r')) {
-                linelen--;
-            }
-            editorAppendRow(line, linelen);
+    // we also strip off the newline or carriage return at the end of the line before copying it into our erow. we know each erow represents one line of text, so we don't need to store a newline character at the end
+    while ((linelen = getline(&line, &linecap, fp)) != -1) {
+        while (linelen > 0 && (line[linelen - 1] == '\n' || line[linelen - 1] == '\r')) {
+            linelen--;
         }
-    }
+        editorAppendRow(line, linelen);
+        }
     free(line);
     fclose(fp);
 }
@@ -294,6 +292,12 @@ void editorScroll(void) {
     if (E.cy >= E.rowoff + E.screenrows) {
         E.rowoff = E.cy - E.screenrows + 1;
     }
+    if (E.cx < E.coloff) {
+        E.coloff = E.cx;
+    }
+    if (E.cx >= E.coloff + E.screencols) {
+        E.coloff = E.cx - E.screencols + 1;
+    }
 }
 
 void editorDrawRows(struct abuf *ab) {
@@ -320,9 +324,10 @@ void editorDrawRows(struct abuf *ab) {
                 abAppend(ab, "~", 1);
             }
         } else {
-            int len = E.row[filerow].size;
+            int len = E.row[filerow].size - E.coloff;
+            if (len < 0) len = 0;
             if (len > E.screencols) len = E.screencols;
-            abAppend(ab, E.row[filerow].chars, len);
+            abAppend(ab, &E.row[filerow].chars[E.coloff], len);
         }
 
         // this is to clear each line as it is redrawn, rather than clearing the entire screen before each refresh
@@ -356,7 +361,7 @@ void editorRefreshScreen(void) {
 
     char buf[32];
     // here the H command specifies the exact position we want the cursor to move to
-    snprintf(buf, sizeof(buf), "\x1b[%d;%dH", (E.cy - E.rowoff) + 1, E.cx + 1);
+    snprintf(buf, sizeof(buf), "\x1b[%d;%dH", (E.cy - E.rowoff) + 1, (E.cx - E.coloff) + 1);
     abAppend(&ab, buf, strlen(buf));
 
     // this should un-hide the cursor after the screen is drawn
@@ -381,9 +386,7 @@ void editorMoveCursor(int key) {
             }
             break;
         case ARROW_RIGHT:
-            if (E.cx != E.screencols - 1) {
-                E.cx++;
-            }
+            E.cx++;
             break;
         case ARROW_UP:
             if (E.cy != 0) {
@@ -444,6 +447,7 @@ void initEditor() {
     E.cx = 0;
     E.cy = 0;
     E.rowoff = 0;
+    E.coloff = 0;
     E.numrows = 0; // at first the editor will only display a single line of text, and so numrows can be either 0 or 1, we'll initialize it to 0 here
     E.row = NULL; // we'll make this a dynamically-allocated array of erow structs, initalized to NULL
 
