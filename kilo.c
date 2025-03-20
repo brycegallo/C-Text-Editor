@@ -378,15 +378,28 @@ void editorRefreshScreen(void) {
 // pressing w or s decrements or decrements E.cy to move the cursor up or down
 
 void editorMoveCursor(int key) {
+    // E.cy is allowed to be one line past the last line of the file, so we use the ternary operator in case ARROW_RIGHT to check if the cursor is on an actual line. If it is, then the row variable will point to the erow that the cursor is on, and we'll check if E.cx is to the left of the end of that line before we allow the cursor to move to the right
+    erow *row = (E.cy >= E.numrows) ? NULL : &E.row[E.cy];
+
     switch (key) {
         case ARROW_LEFT:
             // TODO: simplify these 4 if-statements to be one line each
             if (E.cx != 0) {
                 E.cx--;
+            // if cursor is at the left of the screen and not on the first line, pressing left will go to the end of the line above
+            } else if (E.cy > 0) {
+                E.cy--;
+                E.cx = E.row[E.cy].size;
             }
             break;
         case ARROW_RIGHT:
-            E.cx++;
+            if (row && E.cx < row->size) {
+                E.cx++;
+            // if cursor is at the right of the screen and not on the last line, pressing right will go to the start of the line below
+            } else if (row && E.cx == row->size) {
+                E.cy++;
+                E.cx = 0;
+            }
             break;
         case ARROW_UP:
             if (E.cy != 0) {
@@ -398,6 +411,15 @@ void editorMoveCursor(int key) {
                 E.cy++;
             }
             break;
+    }
+
+    // Despite the change we made above to stop the cursor from moving beyond the end of its own line, it can still move up or down from the end of a longer line to beyond the end of a shorter line, so we fix that here.
+    // first we have to set row again, since E.cy could point to a different line than before. Here we consider a NULL line to be of length 0
+    row = (E.cy >= E.numrows) ? NULL : &E.row[E.cy];
+    int rowlen = row ? row->size : 0;
+    // if E.cx is to the right of the end of the line, we set it to the end of the line
+    if (E.cx > rowlen) {
+        E.cx = rowlen;
     }
 }
 
