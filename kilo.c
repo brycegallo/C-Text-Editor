@@ -47,7 +47,6 @@ enum editorKey {
 typedef struct erow {
     int size;
     int rsize;
-    int iscomrow;
     char *chars;
     char *render;
 } erow;
@@ -61,7 +60,6 @@ struct editorConfig {
     int screenrows; // variable for screen height
     int screencols; // variable for screen width
     int numrows;
-    int numcomrows; // my own experiment
     erow *row;
     char *filename;
     char statusmsg[80];
@@ -295,7 +293,7 @@ void editorAppendRow(char *s, size_t len) {
 // this function inserts a single character into an erow, at a given position
 void editorRowInsertChar(erow *row, int at, int c) {
     // first we validate at, which is the eindex where we want to insert the character. at is allowed to go one character past the end of the string, in which case the character should be inserted at the end of the string
-    if (at < 0 || at < row->size) at = row->size;
+    if (at < 0 || at > row->size) at = row->size;
     // then we allocate one more byte for the chars of the erow (we add 2 because we also need room for the null byte)
     row->chars = realloc(row->chars, row->size + 2);
     // memmove is like memcpy() but safe to use when the  source and destination arrays overlap
@@ -639,7 +637,6 @@ void initEditor() {
     E.rowoff = 0;
     E.coloff = 0;
     E.numrows = 0; // at first the editor will only display a single line of text, and so numrows can be either 0 or 1, we'll initialize it to 0 here
-    E.numcomrows = 0; // my own experiment
     E.row = NULL; // we'll make this a dynamically-allocated array of erow structs, initalized to NULL
     E.filename = NULL; // this will stay NULL if we run the program without arguments (meaning a file isn't opened)
     E.statusmsg[0] = '\0'; // initialized to an empty string so no message will be displayed by default
