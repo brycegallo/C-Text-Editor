@@ -507,6 +507,13 @@ void editorProcessKeypress(void) {
         case PAGE_UP:
         case PAGE_DOWN:
             {
+                if (c == PAGE_UP) {
+                    E.cy = E.rowoff;
+                } else if (c == PAGE_DOWN) {
+                    E.cy = E.rowoff + E.screenrows - 1;
+                    if (E.cy > E.numrows) E.cy = E.numrows;
+                }
+
                 // variables can't be created directly in a switch statement, but we can create a code block with these braces that allows us to create a variable
                 int times = E.screenrows;
                 while (times--) {
