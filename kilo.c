@@ -7,12 +7,14 @@
 
 #include <ctype.h> // gives us: iscntrl()
 #include <errno.h> // gives us: EAGAIN and errno
-#include <stdio.h> // gives us: FILE, fopen(), getline(), perror(), printf(), snprintf(), sscanf()
+#include <stdarg.h> // gives us va_end(), va_start(), va_list
+#include <stdio.h> // gives us: FILE, fopen(), getline(), perror(), printf(), snprintf(), sscanf(), vsnprintf()
 #include <stdlib.h> // gives us: atexit(), exit(), free(), malloc(), realloc()
 #include <string.h> // gives us: memcpy(), strlen(), strdup()
 #include <sys/ioctl.h> // gives us icoctl(), TIOCGWINSZ, struct winsize
 #include <sys/types.h> // gives us ssize_t
 #include <termios.h>  // gives us: struct termios, tcgetattr(), tcsetattr(), ECHO, ICANON, ICRNL, IXTEN, ISIG, IXON, TCSAFLUSH, and also BRKINT, INPCK, ISTRIP, and CS8. also VMIN and VTIME
+#include <time.h> // gives us time(), time_t
 #include <unistd.h> // gives us: standard symbolic constants and types, also write() and STDOUT_FILENO
 
 /*** defines ***/
@@ -60,6 +62,8 @@ struct editorConfig {
     int numrows;
     erow *row;
     char *filename;
+    char statusmsg[80];
+    time_t statusmsg_time;
     struct termios orig_termios; // here we store the original terminal attributes in a global variable
 };
 
@@ -427,6 +431,20 @@ void editorDrawStatusBar(struct abuf *ab) {
         }
     }
     abAppend(ab, "\x1b[m", 3);
+    abAppend(ab, "\r\n", 2);
+}
+
+void editorDrawMessageBar(struct abuf *ab) {
+    // here we clear the message bar with the <esc>[K escape sequence
+    abAppend(ab, "\x1b[K", 3);
+    // then we make sure the message will fit the width of the screen
+    int msglen = strlen(E.statusmsg);
+    if (msglen > E.screencols) msglen = E.screencols;
+    // then we display the message but only if it is less than 5 seconds old
+    // // also the screen is only refreshed when we press a key, so a message will persist longer if no key is pressed
+    if (msglen && time(NULL) - E.statusmsg_time < 5) {
+        abAppend(ab, E.statusmsg, msglen);
+    }
 }
 
 void editorRefreshScreen(void) {
@@ -448,6 +466,7 @@ void editorRefreshScreen(void) {
 
     editorDrawRows(&ab);
     editorDrawStatusBar(&ab);
+    editorDrawMessageBar(&ab);
 
     char buf[32];
     // here the H command specifies the exact position we want the cursor to move to
@@ -460,6 +479,17 @@ void editorRefreshScreen(void) {
     // reposition the cursor at the top-left after drawing tildes
     write(STDOUT_FILENO, ab.b, ab.len);
     abFree(&ab);
+}
+
+// this function takes a format string and a variable number of arguments, similar to printf()
+// // the ... argument makes this a variadic function. C deals with these by having you call va_start() and va_end() on a value of the type va_list. the last argument before the ... (fmt in this case) must be passed to va_start() so that the address of the next argument is known. then between the va_start() and va_end() calls, we would call va_arg() and pass it the type of the next argument (usually gotten from the given format string) and it returns the value of that argument. in this case we pass fmt and ap to vsnprintf() and it takes care of reading the format string and calling va_arg() to get each argument
+void editorSetStatusMessage(const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    // we use vsnprintf to store the resulting string in E.statusmsg and set E.statusmsgtime to the current time with time()
+    vsnprintf(E.statusmsg, sizeof(E.statusmsg), fmt, ap);
+    va_end(ap);
+    E.statusmsg_time = time(NULL); // passing NULL to time() retuns the current time as the number of seconds since 1 Jan 1970
 }
 
 /*** input ***/
@@ -573,10 +603,12 @@ void initEditor() {
     E.numrows = 0; // at first the editor will only display a single line of text, and so numrows can be either 0 or 1, we'll initialize it to 0 here
     E.row = NULL; // we'll make this a dynamically-allocated array of erow structs, initalized to NULL
     E.filename = NULL; // this will stay NULL if we run the program without arguments (meaning a file isn't opened)
+    E.statusmsg[0] = '\0'; // initialized to an empty string so no message will be displayed by default
+    E.statusmsg_time = 0; // will contain a timestamp when we set a status message
 
     if (getWindowSize(&E.screenrows, &E.screencols) == -1) die("getWindowSize");
     // we decrement E.screenrows so that editorDrawRows() doesn't try to draw a line of text at the bottom of the screen
-    E.screenrows -= 1;
+    E.screenrows -= 2; // we are doing 2 now for the message area under the status bar
 }
 
 int main(int argc, char *argv[]) {
@@ -622,6 +654,9 @@ int main(int argc, char *argv[]) {
     //         break;
     //     }
     // }
+
+    // initial status message shows key bindings our text editor currenly uses to quit
+    editorSetStatusMessage("HELP: Ctrl-q = quit");
 
     // the following code replaces the previous code with new functionality
     while (1) {
