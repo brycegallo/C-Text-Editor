@@ -9,7 +9,7 @@
 #include <errno.h> // gives us: EAGAIN and errno
 #include <stdio.h> // gives us: FILE, fopen(), getline(), perror(), printf(), snprintf(), sscanf()
 #include <stdlib.h> // gives us: atexit(), exit(), free(), malloc(), realloc()
-#include <string.h> // gives us: memcpy(), strlen()
+#include <string.h> // gives us: memcpy(), strlen(), strdup()
 #include <sys/ioctl.h> // gives us icoctl(), TIOCGWINSZ, struct winsize
 #include <sys/types.h> // gives us ssize_t
 #include <termios.h>  // gives us: struct termios, tcgetattr(), tcsetattr(), ECHO, ICANON, ICRNL, IXTEN, ISIG, IXON, TCSAFLUSH, and also BRKINT, INPCK, ISTRIP, and CS8. also VMIN and VTIME
@@ -58,7 +58,8 @@ struct editorConfig {
     int screenrows; // variable for screen height
     int screencols; // variable for screen width
     int numrows;
-    erow *row; 
+    erow *row;
+    char *filename;
     struct termios orig_termios; // here we store the original terminal attributes in a global variable
 };
 
@@ -289,6 +290,10 @@ void editorAppendRow(char *s, size_t len) {
 
 // editorOpen() will eventually be for opening and reading a file from disk, so we put this in a new section
 void editorOpen(char *filename) {
+    free(E.filename);
+    // strdup() makes a copy of the given string, allocating the required memory and assuming you will free() that memory
+    E.filename = strdup(filename);
+
     FILE *fp = fopen(filename, "r");
     if (!fp) die ("fopen");
 
@@ -395,10 +400,33 @@ void editorDrawRows(struct abuf *ab) {
         // // the K command erease part of the current line, with a default argument of 0 erasing the part of the line to the right of the cursor, since we want that here, we leave out the 0 and just use <esc>[K
         abAppend(ab, "\x1b[K", 3);
         // this if statement checks to see if we're on the bottom row of the terminal window. if not, we do a new line carriage return
-        if (y < E.screenrows - 1) {
-            abAppend(ab, "\r\n", 2);
-        } 
+        // if (y < E.screenrows - 1) {
+        abAppend(ab, "\r\n", 2);
+        // we removed this if-statement so that editorDrawRows() doesn't try to draw a line of text at the bottom of the screen, because now we want that line to be reserved for the status bar
+        // } 
     }
+}
+
+void editorDrawStatusBar(struct abuf *ab) {
+    abAppend(ab, "\x1b[7m", 4);
+    char status[80], rstatus[80];
+    int len = snprintf(status, sizeof(status), "%.20s - %d lines", E.filename ? E.filename : "[No Name]", E.numrows);
+    // the current line is stored in E.cy and we add 1 to that since E.cy is 0-indexed
+    int rlen = snprintf(rstatus, sizeof(rstatus), "%d/%d", E.cy + 1, E.numrows);
+    if (len > E.screencols) len = E.screencols;
+    abAppend(ab, status, len);
+    // after printing the first status string we print spaces until we get to the point where if we printed the second status string, it would end up right against the edge of the screen. That would be when E.screencols - len is equal to the length of the second status string
+    while (len < E.screencols) {
+        if (E.screencols - len == rlen) {
+            abAppend(ab, rstatus, rlen);
+            break;
+            // if we reach the point described above, we break out of the loop, as the entire status bar is now being printed
+        } else {
+            abAppend(ab, " ", 1);
+            len++;
+        }
+    }
+    abAppend(ab, "\x1b[m", 3);
 }
 
 void editorRefreshScreen(void) {
@@ -419,6 +447,7 @@ void editorRefreshScreen(void) {
     abAppend(&ab, "\x1b[H", 3);
 
     editorDrawRows(&ab);
+    editorDrawStatusBar(&ab);
 
     char buf[32];
     // here the H command specifies the exact position we want the cursor to move to
@@ -501,7 +530,9 @@ void editorProcessKeypress(void) {
             break;
 
         case END_KEY:
-            E.cx = E.screencols -1;
+            if (E.cy < E.numrows) {
+                E.cx = E.row[E.cy].size;
+            }
             break;
 
         case PAGE_UP:
@@ -541,8 +572,11 @@ void initEditor() {
     E.coloff = 0;
     E.numrows = 0; // at first the editor will only display a single line of text, and so numrows can be either 0 or 1, we'll initialize it to 0 here
     E.row = NULL; // we'll make this a dynamically-allocated array of erow structs, initalized to NULL
+    E.filename = NULL; // this will stay NULL if we run the program without arguments (meaning a file isn't opened)
 
     if (getWindowSize(&E.screenrows, &E.screencols) == -1) die("getWindowSize");
+    // we decrement E.screenrows so that editorDrawRows() doesn't try to draw a line of text at the bottom of the screen
+    E.screenrows -= 1;
 }
 
 int main(int argc, char *argv[]) {
