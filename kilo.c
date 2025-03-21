@@ -10,7 +10,7 @@
 #include <stdarg.h> // gives us va_end(), va_start(), va_list
 #include <stdio.h> // gives us: FILE, fopen(), getline(), perror(), printf(), snprintf(), sscanf(), vsnprintf()
 #include <stdlib.h> // gives us: atexit(), exit(), free(), malloc(), realloc()
-#include <string.h> // gives us: memcpy(), strlen(), strdup()
+#include <string.h> // gives us: memcpy(), memmove(), strlen(), strdup()
 #include <sys/ioctl.h> // gives us icoctl(), TIOCGWINSZ, struct winsize
 #include <sys/types.h> // gives us ssize_t
 #include <termios.h>  // gives us: struct termios, tcgetattr(), tcsetattr(), ECHO, ICANON, ICRNL, IXTEN, ISIG, IXON, TCSAFLUSH, and also BRKINT, INPCK, ISTRIP, and CS8. also VMIN and VTIME
@@ -47,6 +47,7 @@ enum editorKey {
 typedef struct erow {
     int size;
     int rsize;
+    int iscomrow;
     char *chars;
     char *render;
 } erow;
@@ -60,6 +61,7 @@ struct editorConfig {
     int screenrows; // variable for screen height
     int screencols; // variable for screen width
     int numrows;
+    int numcomrows; // my own experiment
     erow *row;
     char *filename;
     char statusmsg[80];
@@ -288,6 +290,37 @@ void editorAppendRow(char *s, size_t len) {
     editorUpdateRow(&E.row[at]);
 
     E.numrows++;
+}
+
+// this function inserts a single character into an erow, at a given position
+void editorRowInsertChar(erow *row, int at, int c) {
+    // first we validate at, which is the eindex where we want to insert the character. at is allowed to go one character past the end of the string, in which case the character should be inserted at the end of the string
+    if (at < 0 || at < row->size) at = row->size;
+    // then we allocate one more byte for the chars of the erow (we add 2 because we also need room for the null byte)
+    row->chars = realloc(row->chars, row->size + 2);
+    // memmove is like memcpy() but safe to use when the  source and destination arrays overlap
+    memmove(&row->chars[at + 1], &row->chars[at], row->size - at + 1);
+    // we increment the size of the characters array
+    row->size++;
+    // then we assign the character to its position in the array
+    row->chars[at] = c;
+    // we call editorUpdateRow() so that the render and rsize fields get update with the new row content
+    editorUpdateRow(row);
+}
+
+/*** editor operations ***/
+// this section contains functions that we call from editorProcessKeys() when we're mapping keypresses to various text editiing operations
+
+// this function will take a character and use editorRowInsertChar() to insert that character into the position that the cursor is at
+// // note that this function doesn't have to handle the details of modifying an erow, and editorRowInsertChar() doesn't have to handle the cursor's location. this is the reason we have some functions in /editor operations/ and other functions in /row operations/
+void editorInsertChar(int c) {
+    // this if statement checks if the cursor is on the tilde line after the end of the file. if it is, then the cursor is on the tilde line after the end of the file, so we need to append a new row to the file before inserting a character there
+    if (E.cy == E.numrows) {
+        editorAppendRow("", 0);
+    }
+    editorRowInsertChar(&E.row[E.cy], E.cx, c);
+    // after inserting the character we move the cursor forward so that the next character the user inserts will go after the one they've just inserted
+    E.cx++;
 }
 
 /*** file i/o ***/
@@ -589,6 +622,11 @@ void editorProcessKeypress(void) {
         case ARROW_RIGHT:
             editorMoveCursor(c);
             break;
+
+        // this default: case in the switch statement makes it so that any keypress not mapped to another editor function will be inserted directly into the text being edited
+        default:
+            editorInsertChar(c);
+            break;
     }
 }
 
@@ -601,6 +639,7 @@ void initEditor() {
     E.rowoff = 0;
     E.coloff = 0;
     E.numrows = 0; // at first the editor will only display a single line of text, and so numrows can be either 0 or 1, we'll initialize it to 0 here
+    E.numcomrows = 0; // my own experiment
     E.row = NULL; // we'll make this a dynamically-allocated array of erow structs, initalized to NULL
     E.filename = NULL; // this will stay NULL if we run the program without arguments (meaning a file isn't opened)
     E.statusmsg[0] = '\0'; // initialized to an empty string so no message will be displayed by default
