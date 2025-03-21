@@ -18,6 +18,7 @@
 /*** defines ***/
 
 #define KILO_VERSION "0.0.1"
+#define KILO_TAB_STOP 8
 
 // the CTRL_KEY macro bitwise-ANDS a character with the value 00011111, essentially setting the upper 3 bits to 0, mirroring what the Ctrl key does in the terminal
 // // the ASCII character set seems designed this way on purpose. Similarly it is designed so that you can set and clear bit 5 to switch between lowercase and uppercase
@@ -43,12 +44,15 @@ enum editorKey {
 // erow here stands for "editor row" and stores a line of text as a pointer to the dynamically-allocated character data and a length. the typedef lets us refer to the type as erow instead of struct erow
 typedef struct erow {
     int size;
+    int rsize;
     char *chars;
+    char *render;
 } erow;
 
 // a global struct that will contain our editor state
 struct editorConfig {
     int cx, cy; // variables for holding cursor column and row location
+    int rx;
     int rowoff; // row offset to keep track of which row of the file the user is currently scrolled to
     int coloff; // like rowoff but for columns
     int screenrows; // variable for screen height
@@ -218,6 +222,52 @@ int getWindowSize(int *rows, int *cols) {
 
 /*** row operations ***/
 
+// this function converts a chars index into a render index.
+int editorRowCxToRx(erow *row, int cx) {
+    int rx = 0;
+    int j;
+
+    // for each character, if it's a tab we use rx % KILO_TAB_STOP to find out how many columns we are to the right of the last tab stop, then subtract that from KILO_TAB_STOP - 1 ti find out how many columns we are to the left of the next tab stop. we add that amount to rx to get just to the left of the next tab stop, and then the unconditional rx++ statement gets us right on the next tab stop. This works even if we are currently on a tab stop.
+    for (j = 0; j < cx; j++) {
+        if (row->chars[j] == '\t') {
+            rx += (KILO_TAB_STOP - 1) - (rx % KILO_TAB_STOP);
+        }
+        rx++;
+    }
+    return rx;
+}
+
+// this function uses the chars string of an erow to fill in the contents of the render string. we'll copy each character from chars to render
+void editorUpdateRow(erow *row) {
+    int tabs = 0;
+    int j;
+    // first we have to loop through the chars of the row and count the tabs in order to know how much memory to allocate for render
+    for (j = 0; j < row->size; j++) {
+        if (row->chars[j] == '\t') {
+            tabs++;
+        }
+    }
+
+    free(row->render);
+    row->render = malloc(row->size + tabs*(KILO_TAB_STOP - 1) + 1);
+
+    
+    int idx = 0;
+    // this for loop idx contains the number of characters we copied into row->render so we assign it to row->rsize
+    for (j = 0; j < row->size; j++) {
+        // the maximum number of characters needed for each tab is 8. row->size already counts 1 for each tab, so we multiply the number of tabs by 7 and add that to row->size to get the maximum amount of memory we'll need for that rendered row
+        if (row->chars[j] == '\t') {
+            row->render[idx++] = ' ';
+            while (idx % KILO_TAB_STOP != 0) row->render[idx++] = ' ';
+        } else {
+            row->render[idx++] = row->chars[j];
+        }
+    }
+    row->render[idx] = '\0';
+    row->rsize = idx;
+}
+
+// erow gets constructed and initialized here
 void editorAppendRow(char *s, size_t len) {
     E.row = realloc(E.row, sizeof(erow) * (E.numrows + 1));
 
@@ -226,6 +276,12 @@ void editorAppendRow(char *s, size_t len) {
     E.row[at].chars = malloc(len + 1);
     memcpy(E.row[at].chars, s, len);
     E.row[at].chars[len] = '\0';
+    
+
+    E.row[at].rsize = 0;
+    E.row[at].render = NULL;
+    editorUpdateRow(&E.row[at]);
+
     E.numrows++;
 }
 
@@ -286,17 +342,22 @@ void abFree(struct abuf *ab) {
 /*** output ***/
 
 void editorScroll(void) {
+    E.rx = 0;
+    if (E.cy < E.numrows) {
+        E.rx = editorRowCxToRx(&E.row[E.cy], E.cx);
+    }
+
     if (E.cy < E.rowoff) {
         E.rowoff = E.cy;
     }
     if (E.cy >= E.rowoff + E.screenrows) {
         E.rowoff = E.cy - E.screenrows + 1;
     }
-    if (E.cx < E.coloff) {
-        E.coloff = E.cx;
+    if (E.rx < E.coloff) {
+        E.coloff = E.rx;
     }
-    if (E.cx >= E.coloff + E.screencols) {
-        E.coloff = E.cx - E.screencols + 1;
+    if (E.rx >= E.coloff + E.screencols) {
+        E.coloff = E.rx - E.screencols + 1;
     }
 }
 
@@ -324,10 +385,10 @@ void editorDrawRows(struct abuf *ab) {
                 abAppend(ab, "~", 1);
             }
         } else {
-            int len = E.row[filerow].size - E.coloff;
+            int len = E.row[filerow].rsize - E.coloff;
             if (len < 0) len = 0;
             if (len > E.screencols) len = E.screencols;
-            abAppend(ab, &E.row[filerow].chars[E.coloff], len);
+            abAppend(ab, &E.row[filerow].render[E.coloff], len);
         }
 
         // this is to clear each line as it is redrawn, rather than clearing the entire screen before each refresh
@@ -361,7 +422,7 @@ void editorRefreshScreen(void) {
 
     char buf[32];
     // here the H command specifies the exact position we want the cursor to move to
-    snprintf(buf, sizeof(buf), "\x1b[%d;%dH", (E.cy - E.rowoff) + 1, (E.cx - E.coloff) + 1);
+    snprintf(buf, sizeof(buf), "\x1b[%d;%dH", (E.cy - E.rowoff) + 1, (E.rx - E.coloff) + 1);
     abAppend(&ab, buf, strlen(buf));
 
     // this should un-hide the cursor after the screen is drawn
@@ -468,6 +529,7 @@ void editorProcessKeypress(void) {
 void initEditor() {
     E.cx = 0;
     E.cy = 0;
+    E.rx = 0;
     E.rowoff = 0;
     E.coloff = 0;
     E.numrows = 0; // at first the editor will only display a single line of text, and so numrows can be either 0 or 1, we'll initialize it to 0 here
