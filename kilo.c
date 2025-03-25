@@ -11,7 +11,7 @@
 #include <stdarg.h> // gives us va_end(), va_start(), va_list
 #include <stdio.h> // gives us: FILE, fopen(), getline(), perror(), printf(), snprintf(), sscanf(), vsnprintf()
 #include <stdlib.h> // gives us: atexit(), exit(), free(), malloc(), realloc()
-#include <string.h> // gives us: memcpy(), memmove(), strlen(), strdup()
+#include <string.h> // gives us: memcpy(), memmove(), strerror(), strlen(), strdup()
 #include <sys/ioctl.h> // gives us: icoctl(), TIOCGWINSZ, struct winsize
 #include <sys/types.h> // gives us: ssize_t
 #include <termios.h>  // gives us: struct termios, tcgetattr(), tcsetattr(), ECHO, ICANON, ICRNL, IXTEN, ISIG, IXON, TCSAFLUSH, and also BRKINT, INPCK, ISTRIP, and CS8. also VMIN and VTIME
@@ -63,6 +63,7 @@ struct editorConfig {
     int screencols; // variable for screen width
     int numrows;
     erow *row;
+    int dirty; // tells us whether the file has been changed since opening
     char *filename;
     char statusmsg[80];
     time_t statusmsg_time;
@@ -70,6 +71,12 @@ struct editorConfig {
 };
 
 struct editorConfig E;
+
+/*** prototypes ***/
+
+// we have to create a function prototype here because we are calling editorSetStatusMessage() in a function above where it is called, which is not supposed to be possible in a language like C that is designed to compile in a single pass through the program
+// // when we call a function in C, the compiler needs to know the arguments and return value of that function, we can tell the compiler this information here near the top of the file
+void editorSetStatusMessage(const char *fmt, ...);
 
 /*** terminal ***/
 
@@ -290,6 +297,7 @@ void editorAppendRow(char *s, size_t len) {
     editorUpdateRow(&E.row[at]);
 
     E.numrows++;
+    E.dirty++; // any change to the file will set the dirty flag to not equal 0
 }
 
 // this function inserts a single character into an erow, at a given position
@@ -306,6 +314,7 @@ void editorRowInsertChar(erow *row, int at, int c) {
     row->chars[at] = c;
     // we call editorUpdateRow() so that the render and rsize fields get update with the new row content
     editorUpdateRow(row);
+    E.dirty++; // any change to the file will set the dirty flag to not equal 0
 }
 
 /*** editor operations ***/
@@ -375,6 +384,7 @@ void editorOpen(char *filename) {
         }
     free(line);
     fclose(fp);
+    E.dirty = 0; // editorOpen() calls editorAppendRow() which increments E.dirty, even without the user making any changes, so we want to reset E.dirty after opening the file
 }
 
 // this function will actually write the string return by editorRowsToString() to the disk
@@ -387,14 +397,28 @@ void editorSave(void) {
 
     // we tell open to create a new file if one doesn't already exist, where we have to pass an extra argument containing the mode (permissions) for the new file, so here we use 0644 as iits the standard set of permissions for a text file that the owner wants to read and write to while only letting others read it
     int fd = open(E.filename, O_RDWR  | O_CREAT, 0644);
-    // ftruncate() sets the file's size to a specified length. if its larger than that, it will cut off any data at the end of the file to make it fit that length. if the file is shorter, it will add 0 bytes to the end to make it that length
-    // the normal way to overwrite a file is to pass the O_TRUNC flag to open() which truncates the file completely, by making it an empty file before writing the new data into it.
-    // // by truncating the file ourselves to the same length as the data we're planing to write into it, we're making the whole overwriting operation a bit safer in case ftruncate() succceeds but write() fails. in that case the file would still contain most of the data it had before, as opposed to the case of truncating the file completely and then having write() fail, which would result in all of the data being lost
-    // // // more advanced editors will write to a new temporary file, and then rename that file to the actual file the user wants to overwrite, carefully checking for errors through the whole process.
-    ftruncate(fd, len);
-    write(fd, buf, len);
-    close(fd);
+    // open() and ftruncate() both return -1 on error
+    if (fd != -1) {
+        // ftruncate() sets the file's size to a specified length. if its larger than that, it will cut off any data at the end of the file to make it fit that length. if the file is shorter, it will add 0 bytes to the end to make it that length
+        // the normal way to overwrite a file is to pass the O_TRUNC flag to open() which truncates the file completely, by making it an empty file before writing the new data into it.
+        // // by truncating the file ourselves to the same length as the data we're planing to write into it, we're making the whole overwriting operation a bit safer in case ftruncate() succceeds but write() fails. in that case the file would still contain most of the data it had before, as opposed to the case of truncating the file completely and then having write() fail, which would result in all of the data being lost
+        // // // more advanced editors will write to a new temporary file, and then rename that file to the actual file the user wants to overwrite, carefully checking for errors through the whole process.
+        if (ftruncate(fd, len) != -1) {
+            // we expect write() to return the number of bytes we told it to write
+            if (write(fd, buf, len) == len) {
+                close(fd);
+                free(buf);
+                E.dirty = 0; // after saving the file, it will no longer have any unsaved changes, so we reflect that by resetting E.dirty here
+                editorSetStatusMessage("%d bytes written to disk", len);
+                return;
+            }
+        }
+        // whether or not there was an errorm we still want to make sure we close the file and free the memory that buf points to
+        close(fd);
+    }
     free(buf);
+    // because of the return statement above, we only reach this point if there was an error in the process of saving the file
+    editorSetStatusMessage("Can't save! I/O error: %s", strerror(errno));
 }
 
 /*** append buffer ***/
@@ -493,7 +517,7 @@ void editorDrawRows(struct abuf *ab) {
 void editorDrawStatusBar(struct abuf *ab) {
     abAppend(ab, "\x1b[7m", 4);
     char status[80], rstatus[80];
-    int len = snprintf(status, sizeof(status), "%.20s - %d lines", E.filename ? E.filename : "[No Name]", E.numrows);
+    int len = snprintf(status, sizeof(status), "%.20s - %d lines %s", E.filename ? E.filename : "[No Name]", E.numrows, E.dirty ? "(modified)" : "");
     // the current line is stored in E.cy and we add 1 to that since E.cy is 0-indexed
     int rlen = snprintf(rstatus, sizeof(rstatus), "%d/%d", E.cy + 1, E.numrows);
     if (len > E.screencols) len = E.screencols;
@@ -705,6 +729,7 @@ void initEditor() {
     E.coloff = 0;
     E.numrows = 0; // at first the editor will only display a single line of text, and so numrows can be either 0 or 1, we'll initialize it to 0 here
     E.row = NULL; // we'll make this a dynamically-allocated array of erow structs, initalized to NULL
+    E.dirty = 0; // setting this to 0 because by default, the file will be considred "unchanged" until we make changes. it will just be used as a boolean value but we will also increment it with each change instead of just setting it to 1, so that we can have a sense of how many changes have been made
     E.filename = NULL; // this will stay NULL if we run the program without arguments (meaning a file isn't opened)
     E.statusmsg[0] = '\0'; // initialized to an empty string so no message will be displayed by default
     E.statusmsg_time = 0; // will contain a timestamp when we set a status message
@@ -759,7 +784,7 @@ int main(int argc, char *argv[]) {
     // }
 
     // initial status message shows key bindings our text editor currenly uses to quit
-    editorSetStatusMessage("HELP: Ctrl-q = quit");
+    editorSetStatusMessage("HELP: Ctrk-s = save | Ctrl-q = quit");
 
     // the following code replaces the previous code with new functionality
     while (1) {
