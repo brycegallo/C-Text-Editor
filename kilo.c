@@ -22,6 +22,7 @@
 
 #define KILO_VERSION "0.0.1"
 #define KILO_TAB_STOP 8
+#define KILO_QUIT_TIMES 2
 
 // the CTRL_KEY macro bitwise-ANDS a character with the value 00011111, essentially setting the upper 3 bits to 0, mirroring what the Ctrl key does in the terminal
 // // the ASCII character set seems designed this way on purpose. Similarly it is designed so that you can set and clear bit 5 to switch between lowercase and uppercase
@@ -300,6 +301,24 @@ void editorAppendRow(char *s, size_t len) {
     E.dirty++; // any change to the file will set the dirty flag to not equal 0
 }
 
+void editorFreeRow(erow *row) {
+    free(row->render);
+    free(row->chars);
+}
+
+// this is similar to editorRowDelChar() because here and there we are deleting a single element from an array of elements by its index
+void editorDelRow(int at) {
+    // first we validate the at index
+    if (at < 0 || at >= E.numrows) return;
+    // then we free the memory owned by the row using editorFreeRow()
+    editorFreeRow(&E.row[at]);
+    // then we use memmove() to overwrite the deleted row struct with the rest of the rows that come after it
+    memmove(&E.row[at], &E.row[at + 1], sizeof(erow) * (E.numrows - at - 1));
+    // then we decrement rows and increment the dirty flag
+    E.numrows--;
+    E.dirty++;
+}
+
 // this function inserts a single character into an erow, at a given position
 void editorRowInsertChar(erow *row, int at, int c) {
     // first we validate at, which is the eindex where we want to insert the character. at is allowed to go one character past the end of the string, in which case the character should be inserted at the end of the string
@@ -317,7 +336,32 @@ void editorRowInsertChar(erow *row, int at, int c) {
     E.dirty++; // any change to the file will set the dirty flag to not equal 0
 }
 
+// similar to editorRowInsertChar() but there's no memory management to do
+void editorRowDeleteChar(erow *row, int at) {
+    if (at < 0 || at >= row->size) return;
+    // we use memmove() to overwrite the deleted character with the characters that come after it (including the null byte)
+    memmove(&row->chars[at], &row->chars[at + 1], row->size - at);
+    // then we decrement the row's size, update the row, and set the dirty flag
+    row->size--;
+    editorUpdateRow(row);
+    E.dirty++;
+}
+
+void editorRowAppendString(erow *row, char *s, size_t len) {
+    row->chars = realloc(row->chars, row->size + len + 1);
+    // the row's new size is row->size + len + 1 so we allocate that much memory for row->chars
+    memcpy(&row->chars[row->size], s, len);
+    // then we update row->size
+    row->size += len;
+    // then we add a null byte to the end of the row
+    row->chars[row->size] = '\0';
+    // then we update the row and make sure to increment E.dirty indicate the document has been changed
+    editorUpdateRow(row);
+    E.dirty++;
+}
+
 /*** editor operations ***/
+
 // this section contains functions that we call from editorProcessKeys() when we're mapping keypresses to various text editiing operations
 
 // this function will take a character and use editorRowInsertChar() to insert that character into the position that the cursor is at
@@ -330,6 +374,29 @@ void editorInsertChar(int c) {
     editorRowInsertChar(&E.row[E.cy], E.cx, c);
     // after inserting the character we move the cursor forward so that the next character the user inserts will go after the one they've just inserted
     E.cx++;
+}
+
+void editorDelChar(void) {
+    // if the cursor is past the end of the file so there's nothing to delete and we do nothing
+    if (E.cy == E.numrows) return;
+    // we're at the beginning of the first line so there's nothing to do and we do nothing
+    if (E.cx == 0 && E.cy == 0) return;
+
+    // if the cursor is within the bounds of the file we get the erow the cursor is on
+    erow *row = &E.row[E.cy];
+    // then we check if there's a character to the left of the cursor, delete it, and move the cursor one space to the left
+    if (E.cx > 0) {
+        editorRowDeleteChar(row, E.cx - 1);
+        E.cx--;
+    } else {
+        // if we find that E.cx == 0, we call editorAppendString() and editorDelRow as we planned
+        // row points to the row we are deleting, so we append row->chars to the previous row, then delete the row that E.cy is on
+        // then we set E.cx to the end of the contents of the previous row before appending that row, that way the cursor will end up at the point where the two lines joined
+        E.cx = E.row[E.cy - 1].size;
+        editorRowAppendString(&E.row[E.cy - 1], row->chars, row->size);
+        editorDelRow(E.cy);
+        E.cy--;
+    }
 }
 
 /*** file i/o ***/
@@ -418,6 +485,7 @@ void editorSave(void) {
     }
     free(buf);
     // because of the return statement above, we only reach this point if there was an error in the process of saving the file
+    // // strerror() is like perror() but takes errno as an argument and returns the human-readable string for that error code so that we can make the error part of the status message displayed to the user
     editorSetStatusMessage("Can't save! I/O error: %s", strerror(errno));
 }
 
@@ -648,6 +716,8 @@ void editorMoveCursor(int key) {
 
 // this function waits for a keypress, then handles it
 void editorProcessKeypress(void) {
+    static int quit_times = KILO_QUIT_TIMES;
+    
     int c = editorReadKey();
 
     switch (c) {
@@ -657,6 +727,14 @@ void editorProcessKeypress(void) {
 
         case CTRL_KEY('q'):
             // clear screen and reposition cursor on intentional exit
+            // this if-statement keeps track of how many times the user must press to quit, only allowing exit when it equals 0
+            if (E.dirty && quit_times > 0) {
+                char *s = quit_times == 1 ? "" : "s";
+                // small change of mine to make sure "s" is not included in "times" if quit_times == 1
+                editorSetStatusMessage("Warning! File has unsaved changes. Press Crt-Q %d more time%s to quit.", quit_times, s);
+                quit_times--;
+                return;
+            }
             write(STDIN_FILENO, "\x1b[2J", 4);
             write(STDIN_FILENO, "\x1b[H", 3);
             exit(0);
@@ -680,7 +758,9 @@ void editorProcessKeypress(void) {
         case BACKSPACE:
         case CTRL_KEY('h'):
         case DEL_KEY:
-            /* TODO */
+            // pressing the delete key is equivalent to pressing Arrow Rigbt and Backspace in many systems and contexts, so we do that here
+            if (c == DEL_KEY) editorMoveCursor(ARROW_RIGHT);
+            editorDelChar();
             break;
 
         case PAGE_UP:
@@ -717,6 +797,8 @@ void editorProcessKeypress(void) {
             editorInsertChar(c);
             break;
     }
+    // reset quit_times confirmation count after any other key press, for the next time the user tries to quit
+    quit_times = KILO_QUIT_TIMES;
 }
 
 /*** init ***/
