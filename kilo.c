@@ -7,15 +7,16 @@
 
 #include <ctype.h> // gives us: iscntrl()
 #include <errno.h> // gives us: EAGAIN and errno
+#include <fcntl.h> // gives us: open(), O_CREAT, O_RDWR
 #include <stdarg.h> // gives us va_end(), va_start(), va_list
 #include <stdio.h> // gives us: FILE, fopen(), getline(), perror(), printf(), snprintf(), sscanf(), vsnprintf()
 #include <stdlib.h> // gives us: atexit(), exit(), free(), malloc(), realloc()
 #include <string.h> // gives us: memcpy(), memmove(), strlen(), strdup()
-#include <sys/ioctl.h> // gives us icoctl(), TIOCGWINSZ, struct winsize
-#include <sys/types.h> // gives us ssize_t
+#include <sys/ioctl.h> // gives us: icoctl(), TIOCGWINSZ, struct winsize
+#include <sys/types.h> // gives us: ssize_t
 #include <termios.h>  // gives us: struct termios, tcgetattr(), tcsetattr(), ECHO, ICANON, ICRNL, IXTEN, ISIG, IXON, TCSAFLUSH, and also BRKINT, INPCK, ISTRIP, and CS8. also VMIN and VTIME
-#include <time.h> // gives us time(), time_t
-#include <unistd.h> // gives us: standard symbolic constants and types, also write() and STDOUT_FILENO
+#include <time.h> // gives us: time(), time_t
+#include <unistd.h> // gives us: standard symbolic constants and types, also close(), ftruncate(), write() and STDOUT_FILENO
 
 /*** defines ***/
 
@@ -324,6 +325,32 @@ void editorInsertChar(int c) {
 
 /*** file i/o ***/
 
+// this function converts our array of erow structs into a single string ready to be written out to a file
+char *editorRowsToString(int *buflen) {
+    int totlen = 0;
+    int j;
+    // first we add the lengths of each row of text, adding 1 to the total length each time for the newline character we'll add to the end of each line
+    for (j = 0; j < E.numrows; j++) {
+        totlen += E.row[j].size + 1;
+    }
+    // we save the total length into buflen to tell the caller how long the string is
+    *buflen = totlen;
+
+    // we allocate the required memory
+    char *buf = malloc(totlen);
+    char *p = buf;
+    // then we loop through the rows and memcpy() the contents of each row to the end of the buffer, appending a newline character after each row
+    for (j = 0; j < E.numrows; j++) {
+        memcpy(p, E.row[j].chars, E.row[j].size);
+        p += E.row[j].size;
+        *p = '\n';
+        p++;
+    }
+
+    // lastly, we return buf, and we expect the caller to free() the memory
+    return buf;
+}
+
 // editorOpen() will eventually be for opening and reading a file from disk, so we put this in a new section
 void editorOpen(char *filename) {
     free(E.filename);
@@ -348,6 +375,26 @@ void editorOpen(char *filename) {
         }
     free(line);
     fclose(fp);
+}
+
+// this function will actually write the string return by editorRowsToString() to the disk
+void editorSave(void) {
+    // if it's a new file, then E.filename will be NULL
+    if (E.filename == NULL) return; // so for now we'll just do nothing, but soon we'll implement prompting the user for a name
+
+    int len;
+    char *buf = editorRowsToString(&len);
+
+    // we tell open to create a new file if one doesn't already exist, where we have to pass an extra argument containing the mode (permissions) for the new file, so here we use 0644 as iits the standard set of permissions for a text file that the owner wants to read and write to while only letting others read it
+    int fd = open(E.filename, O_RDWR  | O_CREAT, 0644);
+    // ftruncate() sets the file's size to a specified length. if its larger than that, it will cut off any data at the end of the file to make it fit that length. if the file is shorter, it will add 0 bytes to the end to make it that length
+    // the normal way to overwrite a file is to pass the O_TRUNC flag to open() which truncates the file completely, by making it an empty file before writing the new data into it.
+    // // by truncating the file ourselves to the same length as the data we're planing to write into it, we're making the whole overwriting operation a bit safer in case ftruncate() succceeds but write() fails. in that case the file would still contain most of the data it had before, as opposed to the case of truncating the file completely and then having write() fail, which would result in all of the data being lost
+    // // // more advanced editors will write to a new temporary file, and then rename that file to the actual file the user wants to overwrite, carefully checking for errors through the whole process.
+    ftruncate(fd, len);
+    write(fd, buf, len);
+    close(fd);
+    free(buf);
 }
 
 /*** append buffer ***/
@@ -589,6 +636,10 @@ void editorProcessKeypress(void) {
             write(STDIN_FILENO, "\x1b[2J", 4);
             write(STDIN_FILENO, "\x1b[H", 3);
             exit(0);
+            break;
+
+        case CTRL_KEY('s'):
+            editorSave();
             break;
 
         case HOME_KEY:
