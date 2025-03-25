@@ -30,6 +30,7 @@
 // Here we give a representation for the arrows that doesn't conflict with w,a,s,d or any other chars, so we'll use ints that are out of char's range
 // // by setting the first constant in the enum to 1000, the rest get incrementing values of 1001, 1002, 1003, etc
 enum editorKey {
+    BACKSPACE = 127,
     ARROW_LEFT = 1000,
     ARROW_RIGHT,
     ARROW_UP,
@@ -579,6 +580,10 @@ void editorProcessKeypress(void) {
     int c = editorReadKey();
 
     switch (c) {
+        case '\r':
+            /* TODO */
+            break;
+
         case CTRL_KEY('q'):
             // clear screen and reposition cursor on intentional exit
             write(STDIN_FILENO, "\x1b[2J", 4);
@@ -594,6 +599,13 @@ void editorProcessKeypress(void) {
             if (E.cy < E.numrows) {
                 E.cx = E.row[E.cy].size;
             }
+            break;
+
+        // backspace has no human-readable backslash-escape representation in C so we make it part of the editorKey enum and assign it its ASCII value of 127
+        case BACKSPACE:
+        case CTRL_KEY('h'):
+        case DEL_KEY:
+            /* TODO */
             break;
 
         case PAGE_UP:
@@ -619,6 +631,10 @@ void editorProcessKeypress(void) {
         case ARROW_LEFT:
         case ARROW_RIGHT:
             editorMoveCursor(c);
+            break;
+
+        case CTRL_KEY('l'):
+        case '\x1b':
             break;
 
         // this default: case in the switch statement makes it so that any keypress not mapped to another editor function will be inserted directly into the text being edited
