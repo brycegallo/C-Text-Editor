@@ -283,10 +283,13 @@ void editorUpdateRow(erow *row) {
 }
 
 // erow gets constructed and initialized here
-void editorAppendRow(char *s, size_t len) {
-    E.row = realloc(E.row, sizeof(erow) * (E.numrows + 1));
+void editorInsertRow(int at, char *s, size_t len) {
+    if (at < 0 || at > E.numrows) return;
 
-    int at = E.numrows;
+    E.row = realloc(E.row, sizeof(erow) * (E.numrows + 1));
+    memmove(&E.row[at + 1], &E.row[at], sizeof(erow) * (E.numrows - at));
+
+    // int at = E.numrows;
     E.row[at].size = len;
     E.row[at].chars = malloc(len + 1);
     memcpy(E.row[at].chars, s, len);
@@ -369,11 +372,34 @@ void editorRowAppendString(erow *row, char *s, size_t len) {
 void editorInsertChar(int c) {
     // this if statement checks if the cursor is on the tilde line after the end of the file. if it is, then the cursor is on the tilde line after the end of the file, so we need to append a new row to the file before inserting a character there
     if (E.cy == E.numrows) {
-        editorAppendRow("", 0);
+        editorInsertRow(E.numrows, "", 0);
     }
     editorRowInsertChar(&E.row[E.cy], E.cx, c);
     // after inserting the character we move the cursor forward so that the next character the user inserts will go after the one they've just inserted
     E.cx++;
+}
+
+void editorInsertNewLine(void) {
+    // if we're at the beginning of a line, we only have to insert a new blank row before the line we're on
+    if (E.cx == 0) {
+        editorInsertRow(E.cy, "", 0);
+    // if we're not at the beginning of a line, we have to split the current line into row rows
+    } else {
+        erow *row = &E.row[E.cy];
+        // first we call editorInsertRow() and pass it the characters on the current row after the cursor. this creates a new row after the current one with all the characters that were previously in the current row
+        editorInsertRow(E.cy + 1, &row->chars[E.cx], row->size - E.cx); // this called function includes a call to editorUpdateRow() for the new row
+        // then we reassign the row pointer because editorInsertRow() calls realloc(), which may move memory around and invalidate the pointer
+        row = &E.row[E.cy];
+        // then we truncate the current row's contents by setting its size to the position of the cursor
+        row->size = E.cx;
+        row->chars[row->size] = '\0';
+        // then we call editorUpdateRow() on the truncated row
+        editorUpdateRow(row);
+    }
+    // in both cases we increment E.cy since there's a new row in the file
+    E.cy++;
+    // we also set E.cx to 0 to move the cursor to the beginning of the row
+    E.cx = 0;
 }
 
 void editorDelChar(void) {
@@ -447,11 +473,11 @@ void editorOpen(char *filename) {
         while (linelen > 0 && (line[linelen - 1] == '\n' || line[linelen - 1] == '\r')) {
             linelen--;
         }
-        editorAppendRow(line, linelen);
+        editorInsertRow(E.numrows, line, linelen);
         }
     free(line);
     fclose(fp);
-    E.dirty = 0; // editorOpen() calls editorAppendRow() which increments E.dirty, even without the user making any changes, so we want to reset E.dirty after opening the file
+    E.dirty = 0; // editorOpen() calls editorAppendRow() which increments E.dirty, even without the user making any changes, so we want to reset E.dirty after opening the file ---- editorAppendRow() has been changed to editorInsertRow
 }
 
 // this function will actually write the string return by editorRowsToString() to the disk
@@ -722,7 +748,7 @@ void editorProcessKeypress(void) {
 
     switch (c) {
         case '\r':
-            /* TODO */
+            editorInsertNewLine();
             break;
 
         case CTRL_KEY('q'):
