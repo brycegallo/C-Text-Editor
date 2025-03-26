@@ -545,19 +545,44 @@ void editorSave(void) {
 
 // in this callback, we check if the user pressed Enter or Escape, in which case they are leaving search mode so we return immediately instead of doing another search.
 void editorFindCallback(char *query, int key) {
+    // last match will contain the index of the row that the last match was on, or -1 if there was no last match
+    static int last_match = -1;
+    // direction will store the direction of the search, 1 for forwards and -1 for backwards
+    static int direction = 1;
+    
+    // we always reset last_match to -1 unless an arrow key was pressed, so we only advanced to the next or previous match when that happens. direction is also always set to 1 unless the left or up keys are pressed. so we always search forward unless the user specifies otherwise
     if (key == '\r' || key == '\x1b') {
+        last_match = -1;
+        direction = 1;
         return;
+    } else if (key == ARROW_RIGHT || key == ARROW_DOWN) {
+        direction = 1;
+    } else if (key == ARROW_LEFT || key == ARROW_UP) {
+        direction = -1;
+    } else {
+        last_match = -1;
+        direction = 1;
     }
 
+    if (last_match == -1) direction = 1;
+    // current is the index of the current row we're searching. if there was a last match, it starts on the line before (if searching forwards) or after (searching backwards). if there wasn't a last match, it starts at the top of the file and searches forward to find the first match
+    int current = last_match;
     // if the user hasn't pressed Enter or Escape, any key press starts another search for the current query string
     int i;
     // looping through all the rows of the file here
     for (i = 0; i < E.numrows; i++) {
-        erow *row = &E.row[i];
+        current += direction;
+        // this if-else-if statement causes current to go from the end of the file back to beginning, or from the begining to the end, to allow a search to "wrap around" the end of the file and continue from the top (or bottom)
+        if (current == -1) current = E.numrows - 1;
+        else if (current == E.numrows) current = 0;
+
+        erow *row = &E.row[current];
         // we use strstr() to check if query is a substring of the current row. it returns a pointer to the matching substring if there is a match, and otherwise returns NULL
         char *match = strstr(row->render, query);
         if (match) {
-            E.cy = i;
+            // when we find a match we set last_match to current, so that if the user presses the arrow keys, the next search starts from that point
+            last_match = current;
+            E.cy = current;
             // if there is a match, we take the pointer to the matching substring and convert it into an index that we can set E.cx to, by substracting the row->render pointer from the match pointer, since match is a pointer into the row->render string
             // E.cx = match - row->render; // there is an issue here: E.cx is an index into chars, but we assigned it to a render index. if there are tabs to the left of the match, the cursor will be in the wrong position. we must convert the render index into a chars index before assigning it to E.cx
             E.cx = editorRowRxToCx(row, match - row->render); // this will now convert the matched index to a chars index and assign it to E.cx;
@@ -577,7 +602,7 @@ void editorFind(void) {
     int saved_coloff = E.coloff;
     int saved_rowoff = E.rowoff;
 
-    char *query = editorPrompt("Search: %s (ESC to cancel)", editorFindCallback);
+    char *query = editorPrompt("Search: %s (ESC/Arrows/Enter)", editorFindCallback);
     // if the user pressed Escape to cancel the input prompt, then editorPrompt() returns NULL, we cancel the search, and restore the cursor to where it was
     if (query){
         free(query);
