@@ -11,7 +11,7 @@
 #include <stdarg.h> // gives us va_end(), va_start(), va_list
 #include <stdio.h> // gives us: FILE, fopen(), getline(), perror(), printf(), snprintf(), sscanf(), vsnprintf()
 #include <stdlib.h> // gives us: atexit(), exit(), free(), malloc(), realloc()
-#include <string.h> // gives us: memcpy(), memmove(), strerror(), strlen(), strdup()
+#include <string.h> // gives us: memcpy(), memmove(), strerror(), strlen(), strdup(), strstr()
 #include <sys/ioctl.h> // gives us: icoctl(), TIOCGWINSZ, struct winsize
 #include <sys/types.h> // gives us: ssize_t
 #include <termios.h>  // gives us: struct termios, tcgetattr(), tcsetattr(), ECHO, ICANON, ICRNL, IXTEN, ISIG, IXON, TCSAFLUSH, and also BRKINT, INPCK, ISTRIP, and CS8. also VMIN and VTIME
@@ -252,6 +252,23 @@ int editorRowCxToRx(erow *row, int cx) {
         rx++;
     }
     return rx;
+}
+
+int editorRowRxToCx(erow *row, int rx) {
+    int cur_rx = 0;
+    int cx;
+    // to convert an rx to a cx we reverse the function for doing the opposite. we loop through the chars string, calculating current rx value (cur_rx) as we go. we want to stop when cur_rx hits the given rx value and return cx
+    for (cx = 0; cx < row->size; cx++) {
+        if (row->chars[cx] == '\t') {
+            cur_rx += (KILO_TAB_STOP - 1) - (cur_rx % KILO_TAB_STOP);
+        }
+        cur_rx++;
+
+        // this return statement should handle all rx values that are valid indexes into render
+        if (cur_rx > rx) return cx;
+    }
+    // this return statement is just in case the caller provides an rx that's out of range, which shouldn't happen
+    return cx;
 }
 
 // this function uses the chars string of an erow to fill in the contents of the render string. we'll copy each character from chars to render
@@ -522,6 +539,35 @@ void editorSave(void) {
     // because of the return statement above, we only reach this point if there was an error in the process of saving the file
     // // strerror() is like perror() but takes errno as an argument and returns the human-readable string for that error code so that we can make the error part of the status message displayed to the user
     editorSetStatusMessage("Can't save! I/O error: %s", strerror(errno));
+}
+
+/*** find ***/
+
+// when the user types a search query and presses Enter, we'll loop through all the rows of the file, and if a row contains their query string, we'll move the cursor to the match
+void editorFind(void) {
+    char *query = editorPrompt("Search: %s (ESC to cancel)");
+    // if the user pressed Escape to cancel the input prompt, then editorPrompt() returns NULL and we cancel the search
+    if (query == NULL) return;
+
+    int i;
+    // looping through all the rows of the file here
+    for (i = 0; i < E.numrows; i++) {
+        erow *row = &E.row[i];
+        // we use strstr() to check if query is a substring of the current row. it returns a pointer to the matching substring if there is a match, and otherwise returns NULL
+        char *match = strstr(row->render, query);
+        if (match) {
+            E.cy = i;
+            // if there is a match, we take the pointer to the matching substring and convert it into an index that we can set E.cx to, by substracting the row->render pointer from the match pointer, since match is a pointer into the row->render string
+            // E.cx = match - row->render; // there is an issue here: E.cx is an index into chars, but we assigned it to a render index. if there are tabs to the left of the match, the cursor will be in the wrong position. we must convert the render index into a chars index before assigning it to E.cx
+            E.cx = editorRowRxToCx(row, match - row->render); // this will now convert the matched index to a chars index and assign it to E.cx;
+
+            // the last thing we do is set E.rowoff so that we're at the very bottom of the file, which will cause editorScroll() to scroll up at the next screen refresh so that the matching line will be at the very top of the screen. This will make it so the user doesn't have to look all over the screen to find where their cursor jumped or where the matching line is
+            E.rowoff = E.numrows;
+            break;
+        }
+    }
+
+    free(query);
 }
 
 /*** append buffer ***/
@@ -834,6 +880,10 @@ void editorProcessKeypress(void) {
             }
             break;
 
+        case CTRL_KEY('f'):
+            editorFind();
+            break;
+
         // backspace has no human-readable backslash-escape representation in C so we make it part of the editorKey enum and assign it its ASCII value of 127
         case BACKSPACE:
         case CTRL_KEY('h'):
@@ -946,7 +996,7 @@ int main(int argc, char *argv[]) {
     // }
 
     // initial status message shows key bindings our text editor currenly uses to quit
-    editorSetStatusMessage("HELP: Ctrk-s = save | Ctrl-q = quit");
+    editorSetStatusMessage("HELP: Ctrl-s = save | Ctrl-f = find | Ctrl-q = quit");
 
     // the following code replaces the previous code with new functionality
     while (1) {
