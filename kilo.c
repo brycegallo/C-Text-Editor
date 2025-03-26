@@ -78,6 +78,8 @@ struct editorConfig E;
 // we have to create a function prototype here because we are calling editorSetStatusMessage() in a function above where it is called, which is not supposed to be possible in a language like C that is designed to compile in a single pass through the program
 // // when we call a function in C, the compiler needs to know the arguments and return value of that function, we can tell the compiler this information here near the top of the file
 void editorSetStatusMessage(const char *fmt, ...);
+void editorRefreshScreen();
+char *editorPrompt(char *prompt);
 
 /*** terminal ***/
 
@@ -483,7 +485,14 @@ void editorOpen(char *filename) {
 // this function will actually write the string return by editorRowsToString() to the disk
 void editorSave(void) {
     // if it's a new file, then E.filename will be NULL
-    if (E.filename == NULL) return; // so for now we'll just do nothing, but soon we'll implement prompting the user for a name
+    if (E.filename == NULL) {
+        E.filename = editorPrompt("Save as: %s (ESC to cancel)");
+        // here we handle the user pressing Escape, which would result in NULL being returned
+        if (E.filename == NULL) {
+            editorSetStatusMessage("Save cancelled");
+            return;
+        }
+    }
 
     int len;
     char *buf = editorRowsToString(&len);
@@ -690,6 +699,51 @@ void editorSetStatusMessage(const char *fmt, ...) {
 }
 
 /*** input ***/
+
+// this function displays a prompt in the status bar for the user to enter a filename for a new file, and lets the user input a line of text after the prompt
+char *editorPrompt(char *prompt) {
+    size_t bufsize = 128;
+    char *buf = malloc(bufsize);
+
+    size_t buflen = 0;
+    // we initialize buf to the empty string
+    buf[0] = '\0';
+
+    // this infinite loop repeatedly sets the status message, refreshes the screen, and waits for a keypress to handle
+    while (1) {
+        // the prompt is expected to be a formatted string contain an %s, which is where the user's input will display
+        editorSetStatusMessage(prompt, buf);
+        editorRefreshScreen();
+
+        int c = editorReadKey();
+        // this will allow the user to delete input when typing a response to the save prompt
+        if (c == DEL_KEY || c == CTRL_KEY('h') || c == BACKSPACE) {
+            if (buflen != 0) buf[--buflen] = '\0';
+        // we'll use the Escape key to cancel the input prompt
+        } else if (c == '\x1b') {
+            editorSetStatusMessage(""); // we clear the prompt
+            free(buf); // we free() the buf from memory ourselves
+            return NULL;
+        } else if (c == '\r') {
+            // if the user's input is not empty, pressing Enter will clear the status message and return their input
+            if (buflen != 0) {
+                editorSetStatusMessage("");
+                return buf;
+            }
+            // if they input a printable character without hitting Enter, we append it to buf
+            // we do also have to make sure that the input key isn't one of the special keys in the editorKey enum, so we test that by checking that the input key is in the range of a char, which is less than 128
+        } else if (!iscntrl(c) && c < 128) {
+            // if buflen reaches the maximum capacity we allocated (stored in bufsize) we double bufsize and sallocate that amount of memory before appending to buf
+            if (buflen == bufsize - 1) {
+                bufsize *= 2;
+                buf = realloc(buf, bufsize);
+            }
+            buf[buflen++] = c;
+            // we also make sure that buf ends with a \0 character because both editorSetStatusMessage() and the caller of editorPrompt() will use it to know where the string ends
+            buf[buflen] = '\0';
+        }
+    }
+}
 
 // Here we make it so that pressing a or d decrements or decrements E.cx to move the cursor left or right
 // pressing w or s decrements or decrements E.cy to move the cursor up or down
