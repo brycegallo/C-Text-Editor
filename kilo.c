@@ -79,7 +79,7 @@ struct editorConfig E;
 // // when we call a function in C, the compiler needs to know the arguments and return value of that function, we can tell the compiler this information here near the top of the file
 void editorSetStatusMessage(const char *fmt, ...);
 void editorRefreshScreen();
-char *editorPrompt(char *prompt);
+char *editorPrompt(char *prompt, void (*callback)(char *, int));
 
 /*** terminal ***/
 
@@ -503,7 +503,7 @@ void editorOpen(char *filename) {
 void editorSave(void) {
     // if it's a new file, then E.filename will be NULL
     if (E.filename == NULL) {
-        E.filename = editorPrompt("Save as: %s (ESC to cancel)");
+        E.filename = editorPrompt("Save as: %s (ESC to cancel)", NULL);
         // here we handle the user pressing Escape, which would result in NULL being returned
         if (E.filename == NULL) {
             editorSetStatusMessage("Save cancelled");
@@ -543,12 +543,13 @@ void editorSave(void) {
 
 /*** find ***/
 
-// when the user types a search query and presses Enter, we'll loop through all the rows of the file, and if a row contains their query string, we'll move the cursor to the match
-void editorFind(void) {
-    char *query = editorPrompt("Search: %s (ESC to cancel)");
-    // if the user pressed Escape to cancel the input prompt, then editorPrompt() returns NULL and we cancel the search
-    if (query == NULL) return;
+// in this callback, we check if the user pressed Enter or Escape, in which case they are leaving search mode so we return immediately instead of doing another search.
+void editorFindCallback(char *query, int key) {
+    if (key == '\r' || key == '\x1b') {
+        return;
+    }
 
+    // if the user hasn't pressed Enter or Escape, any key press starts another search for the current query string
     int i;
     // looping through all the rows of the file here
     for (i = 0; i < E.numrows; i++) {
@@ -566,8 +567,28 @@ void editorFind(void) {
             break;
         }
     }
+}
 
-    free(query);
+// when the user types a search query and presses Enter, we'll loop through all the rows of the file, and if a row contains their query string, we'll move the cursor to the match
+// // most of the code formerly here was moved to editorFindCallback
+void editorFind(void) {
+    int saved_cx = E.cx;
+    int saved_cy = E.cy;
+    int saved_coloff = E.coloff;
+    int saved_rowoff = E.rowoff;
+
+    char *query = editorPrompt("Search: %s (ESC to cancel)", editorFindCallback);
+    // if the user pressed Escape to cancel the input prompt, then editorPrompt() returns NULL, we cancel the search, and restore the cursor to where it was
+    if (query){
+        free(query);
+    } else {
+        // this will reset the cursor to its pre-search location
+        E.cx = saved_cx;
+        E.cy = saved_cy;
+        E.coloff = saved_coloff;
+        E.rowoff = saved_rowoff;
+    }
+    
 }
 
 /*** append buffer ***/
@@ -747,7 +768,7 @@ void editorSetStatusMessage(const char *fmt, ...) {
 /*** input ***/
 
 // this function displays a prompt in the status bar for the user to enter a filename for a new file, and lets the user input a line of text after the prompt
-char *editorPrompt(char *prompt) {
+char *editorPrompt(char *prompt, void (*callback)(char *, int)) {
     size_t bufsize = 128;
     char *buf = malloc(bufsize);
 
@@ -768,12 +789,14 @@ char *editorPrompt(char *prompt) {
         // we'll use the Escape key to cancel the input prompt
         } else if (c == '\x1b') {
             editorSetStatusMessage(""); // we clear the prompt
+            if (callback) callback(buf, c); // this if-statement allows the caller to pass NULL for the callback, in case they don't want to use a callback
             free(buf); // we free() the buf from memory ourselves
             return NULL;
         } else if (c == '\r') {
             // if the user's input is not empty, pressing Enter will clear the status message and return their input
             if (buflen != 0) {
                 editorSetStatusMessage("");
+                if (callback) callback(buf, c);
                 return buf;
             }
             // if they input a printable character without hitting Enter, we append it to buf
@@ -788,6 +811,8 @@ char *editorPrompt(char *prompt) {
             // we also make sure that buf ends with a \0 character because both editorSetStatusMessage() and the caller of editorPrompt() will use it to know where the string ends
             buf[buflen] = '\0';
         }
+
+        if (callback) callback(buf, c);
     }
 }
 
