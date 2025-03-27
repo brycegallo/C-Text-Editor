@@ -695,7 +695,19 @@ void editorDrawRows(struct abuf *ab) {
             int len = E.row[filerow].rsize - E.coloff;
             if (len < 0) len = 0;
             if (len > E.screencols) len = E.screencols;
-            abAppend(ab, &E.row[filerow].render[E.coloff], len);
+            // we can longer use our previous approach of feeding the substring render that we want to print right into abAppend(), now we must do it character-by-character to handle color highlighting
+            char *c = &E.row[filerow].render[E.coloff];
+            int j;
+            // we loop through the characters here and use isDigit() to check if a character is a number, if so then we precede it with the <esc>[32m escape sequence to make it blue, then follow that with the escape sequence for the default color, <esc>[39m. the m here is the same argument we used to invert colors in the status bar
+            for (j = 0; j < len; j++) {
+                if (isdigit(c[j])) {
+                    abAppend(ab, "\x1b[32m", 5);
+                    abAppend(ab, &c[j], 1);
+                    abAppend(ab, "\x1b[39m", 5);
+                } else {
+                    abAppend(ab, &c[j], 1);
+                }
+            }
         }
 
         // this is to clear each line as it is redrawn, rather than clearing the entire screen before each refresh
