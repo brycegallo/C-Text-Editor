@@ -11,7 +11,7 @@
 #include <stdarg.h> // gives us va_end(), va_start(), va_list
 #include <stdio.h> // gives us: FILE, fopen(), getline(), perror(), printf(), snprintf(), sscanf(), vsnprintf()
 #include <stdlib.h> // gives us: atexit(), exit(), free(), malloc(), realloc()
-#include <string.h> // gives us: memcpy(), memmove(), strerror(), strlen(), strdup(), strstr()
+#include <string.h> // gives us: memcpy(), memmove(), memset(), strerror(), strlen(), strdup(), strstr()
 #include <sys/ioctl.h> // gives us: icoctl(), TIOCGWINSZ, struct winsize
 #include <sys/types.h> // gives us: ssize_t
 #include <termios.h>  // gives us: struct termios, tcgetattr(), tcsetattr(), ECHO, ICANON, ICRNL, IXTEN, ISIG, IXON, TCSAFLUSH, and also BRKINT, INPCK, ISTRIP, and CS8. also VMIN and VTIME
@@ -44,6 +44,12 @@ enum editorKey {
     PAGE_DOWN
 };
 
+// here we'll have each value in the hl array corespond to a character in render, and it will tell us whether that character is part of a string, comment, number, etc. and this enum will contain the possible values hl can contain
+enum editorHighlight {
+    HL_NORMAL = 0,
+    HL_NUMBER
+};
+
 /*** data ***/
 
 // erow here stands for "editor row" and stores a line of text as a pointer to the dynamically-allocated character data and a length. the typedef lets us refer to the type as erow instead of struct erow
@@ -52,6 +58,7 @@ typedef struct erow {
     int rsize;
     char *chars;
     char *render;
+    unsigned char *hl; //hl here stands for highlight. this is an array of unsigned char values, meaning integers in the range 0 to 255
 } erow;
 
 // a global struct that will contain our editor state
@@ -237,6 +244,31 @@ int getWindowSize(int *rows, int *cols) {
     }
 }
 
+/*** syntax highlighting ***/
+
+void editorUpdateSyntax(erow *row) {
+    // first we realloc() the needed memory, since the row might be bigger than the last time we highlighted it, or it could be a new row
+    // // note that the size of the hl array is the same as the size of the render array, so we use rsize as the amount of memory to allocate
+    row->hl = realloc(row->hl, row->rsize);
+    // we use memset to set all characters to HL_NORMAL by default, before looping through the characters and setting the digits to HL_NUMBER
+    memset(row->hl, HL_NORMAL, row->rsize);
+
+    int i;
+    for (i = 0; i < row->rsize; i++) {
+        if (isdigit(row->render[i])) {
+            row->hl[i] = HL_NUMBER;
+        }
+    }
+}
+
+int editorSyntaxToColor(int hl) {
+    switch (hl) {
+        // we're handling HL_NORMAL separately so we don't include it here
+        case HL_NUMBER: return 32; // any color will be rendered blue
+        default: return 37; // anything else will be rendered white
+    }
+}
+
 /*** row operations ***/
 
 // this function converts a chars index into a render index.
@@ -299,6 +331,9 @@ void editorUpdateRow(erow *row) {
     }
     row->render[idx] = '\0';
     row->rsize = idx;
+
+    // we call editorUpdateSyntax() here because editorUpdateRow() already has the job of updating the render array whenever the text of a row changes, so it makes sense that this is where we'd want to update the hl array, after we've updated render above
+    editorUpdateSyntax(row);
 }
 
 // erow gets constructed and initialized here
@@ -317,6 +352,7 @@ void editorInsertRow(int at, char *s, size_t len) {
 
     E.row[at].rsize = 0;
     E.row[at].render = NULL;
+    E.row[at].hl = NULL;
     editorUpdateRow(&E.row[at]);
 
     E.numrows++;
@@ -326,6 +362,7 @@ void editorInsertRow(int at, char *s, size_t len) {
 void editorFreeRow(erow *row) {
     free(row->render);
     free(row->chars);
+    free(row->hl);
 }
 
 // this is similar to editorRowDelChar() because here and there we are deleting a single element from an array of elements by its index
@@ -697,17 +734,34 @@ void editorDrawRows(struct abuf *ab) {
             if (len > E.screencols) len = E.screencols;
             // we can longer use our previous approach of feeding the substring render that we want to print right into abAppend(), now we must do it character-by-character to handle color highlighting
             char *c = &E.row[filerow].render[E.coloff];
+            // first we get a pointer, hl, to the slice of the hl array that corresponds to the slice of render that we are printing
+            unsigned char *hl = &E.row[filerow].hl[E.coloff];
+            int current_color = -1; // we set this to -1 when we want the default text color, otherwise it's set to the value editorSyntaxToColor() last returned
             int j;
-            // we loop through the characters here and use isDigit() to check if a character is a number, if so then we precede it with the <esc>[32m escape sequence to make it blue, then follow that with the escape sequence for the default color, <esc>[39m. the m here is the same argument we used to invert colors in the status bar
+            // no longer up to date comment // we loop through the characters here and use isdigit() to check if a character is a number, if so then we precede it with the <esc>[32m escape sequence to make it blue, then follow that with the escape sequence for the default color, <esc>[39m. the m here is the same argument we used to invert colors in the status bar
+            // for each character we check if it's HL_NORMAL (where we'd use the default color) or something else. if it's something else then we use snprintf() to write the escape sequence into a buffer which we pass to abAppend() before appending the actual character
             for (j = 0; j < len; j++) {
-                if (isdigit(c[j])) {
-                    abAppend(ab, "\x1b[32m", 5);
+                if (hl[j] == HL_NORMAL) {
+                    if (current_color != -1) {
+                        // when we go from highlighted text back to HL_NORMAL we print out the normal color escape sequence and set current_color to -1
+                        abAppend(ab, "\x1b[39m", 5);
+                        current_color = -1;
+                    }
                     abAppend(ab, &c[j], 1);
-                    abAppend(ab, "\x1b[39m", 5);
+                // if the color changes, we print out the escape sequence for that new color and set current_color to it
                 } else {
+                    int color = editorSyntaxToColor(hl[j]);
+                    if (color != current_color) {
+                        current_color = color;
+                        char buf[16];
+                        int clen = snprintf(buf, sizeof(buf), "\x1b[%dm", color);
+                        abAppend(ab, buf, clen);
+                    }
                     abAppend(ab, &c[j], 1);
                 }
             }
+            // after we're done loopthrough and display all the characters, we print a final <esc>[39m escape sequence to make sure the text color is reset to default
+            abAppend(ab, "\x1b[39m", 5);
         }
 
         // this is to clear each line as it is redrawn, rather than clearing the entire screen before each refresh
