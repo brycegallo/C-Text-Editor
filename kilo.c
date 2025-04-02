@@ -11,7 +11,7 @@
 #include <stdarg.h> // gives us va_end(), va_start(), va_list
 #include <stdio.h> // gives us: FILE, fopen(), getline(), perror(), printf(), snprintf(), sscanf(), vsnprintf()
 #include <stdlib.h> // gives us: atexit(), exit(), free(), malloc(), realloc()
-#include <string.h> // gives us: memcpy(), memmove(), memset(), strchr(), strdup(), strerror(), strlen(), strstr()
+#include <string.h> // gives us: memcpy(), memmove(), memset(), strchr(), strcmp(), strdup(), strerror(), strlen(), strrchr(), strstr()
 #include <sys/ioctl.h> // gives us: icoctl(), TIOCGWINSZ, struct winsize
 #include <sys/types.h> // gives us: ssize_t
 #include <termios.h>  // gives us: struct termios, tcgetattr(), tcsetattr(), ECHO, ICANON, ICRNL, IXTEN, ISIG, IXON, TCSAFLUSH, and also BRKINT, INPCK, ISTRIP, and CS8. also VMIN and VTIME
@@ -51,7 +51,15 @@ enum editorHighlight {
     HL_MATCH
 };
 
+#define HL_HIGHLIGHT_NUMBERS (1<<0)
+
 /*** data ***/
+
+struct editorSyntax {
+    char *filetype; // this will hold the name of the filetype displayed to the user in the status bar
+    char **filematch; // this will be an array of strings where each string contains a pattern to match a filename against. if the filename matches, then the file will be recognized as having that filetype
+    int flags; // this will be a bit field that will contain flags for whether to highlight numbers and whether to highlight strings for that filetype
+};
 
 // erow here stands for "editor row" and stores a line of text as a pointer to the dynamically-allocated character data and a length. the typedef lets us refer to the type as erow instead of struct erow
 typedef struct erow {
@@ -76,10 +84,27 @@ struct editorConfig {
     char *filename;
     char statusmsg[80];
     time_t statusmsg_time;
+    struct editorSyntax *syntax;
     struct termios orig_termios; // here we store the original terminal attributes in a global variable
 };
 
 struct editorConfig E;
+
+/*** filetypes ***/
+
+char *C_HL_extensions[] = { ".c", ".h", ".cpp", NULL };
+
+// HLDB here is our "highlight database"
+struct editorSyntax HLDB[] = {
+    {
+        "c",
+        C_HL_extensions,
+        HL_HIGHLIGHT_NUMBERS
+    },
+};
+
+// this is a constant that will store the length of the HLDB array
+#define HLDB_ENTRIES (sizeof(HLDB) / sizeof(HLDB[0]))
 
 /*** prototypes ***/
 
@@ -259,6 +284,9 @@ void editorUpdateSyntax(erow *row) {
     // we use memset to set all characters to HL_NORMAL by default, before looping through the characters and setting the digits to HL_NUMBER
     memset(row->hl, HL_NORMAL, row->rsize);
 
+    // if no filetype is set, we return immediately after memset()ing the entire line to HL_NORMAL
+    if (E.syntax == NULL) return;
+
     // we initialize prev_sep to 1 (meaning true) because we consider the beginning of hte line to be a separator. without this, numbers at the very beginning of the line wouldn't be highlighted
     int prev_sep = 1;
 
@@ -271,14 +299,16 @@ void editorUpdateSyntax(erow *row) {
 
         // to highlight a digit with HL_NUMBER we now require the previous character to be a separator, or to also be highlighted with HL_NUMBER
         // we're also accounting for decimals here by highlighting a '.' that comes after a character we just highlighted as a number
-        if (isdigit(c) && (prev_sep || prev_hl == HL_NUMBER) || (c == '.' && prev_hl == HL_NUMBER)) {
-            row->hl[i] = HL_NUMBER;
-            // when we decide to highlight the current character a certain way, we increment i to "consume" that character, set prev_sep to 0 to indicate that we're in the middle of highlighting something, and then continue the loop
-            i++;
-            prev_sep = 0;
-            continue;
+        if (E.syntax->flags & HL_HIGHLIGHT_NUMBERS) {
+            // the above if-statement checks to see if numbers should be highlighted for the current filetype
+            if ((isdigit(c) && (prev_sep || prev_hl == HL_NUMBER)) || (c == '.' && prev_hl == HL_NUMBER)) {
+                row->hl[i] = HL_NUMBER;
+                // when we decide to highlight the current character a certain way, we increment i to "consume" that character, set prev_sep to 0 to indicate that we're in the middle of highlighting something, and then continue the loop
+                i++;
+                prev_sep = 0;
+                continue;
+            }
         }
-
         // if we end up not highlighting the previous character, then we end up here where we set prev_sep according to whether the current character is a separator and increment i to consume the character. the memset() we did at the top of the function means that an unhighlighted character will have a value of HL_NORMAL in hl
         prev_sep = is_separator(c);
         i++;
@@ -291,6 +321,41 @@ int editorSyntaxToColor(int hl) {
         case HL_NUMBER: return 32; // any number will be rendered green
         case HL_MATCH: return 34; // any match to a search query will be rendered blue
         default: return 37; // anything else will be rendered white
+    }
+}
+
+// this function will try to match the current filename to one of the filematch fields in HLDB. if one matches, it'll set E.syntax to that filetype
+void editorSelectSyntaxHighlight(void) {
+    // we set E.syntax to NULL first so that if there is no filename, then there is no filetype
+    E.syntax = NULL;
+    if (E.filename == NULL) return;
+
+    // strrchr() returns a pointer to the last occurrence of a character in a string
+    // if there is no extension, then ext will be NULL
+    char *ext = strrchr(E.filename, '.');
+
+    // we loop through each editorSyntax struct in the HLDB array, and for each of those we loop through each pattern in its filematch array
+    for (unsigned int j = 0; j < HLDB_ENTRIES; j++) {
+        struct editorSyntax *s = &HLDB[j];
+        unsigned int i = 0;
+        while (s->filematch[i]) {
+            int is_ext = (s->filematch[i][0] == '.');
+            // strcmp() returns 0 if two given strings are equal
+            // if the pattern stats with a . then it's a file extension pattern and we use strmp() to see if the filename ends with that extension. if it's not a file extension pattern then we just check to see if the pattern exists anywhere in the filename, using strstr(). 
+            if ((is_ext && ext && !strcmp(ext, s->filematch[i])) || (!is_ext && strstr(E.filename, s->filematch[i]))) {
+                // if the filename matched according to those rules, then we set E.syntax to the current editorSyntax struct, and return
+                E.syntax = s;
+                
+                int filerow;
+                // in order to update the highlighting for the entire file after setting E.syntax, we loop through each row in the file and call editorUpdateSyntax() on it. this ensures that highlighting immediately changes when the filetype changes
+                for (filerow = 0; filerow < E.numrows; filerow++) {
+                    editorUpdateSyntax(&E.row[filerow]);
+                }
+
+                return;
+            }
+            i++;
+        }
     }
 }
 
@@ -540,6 +605,9 @@ void editorOpen(char *filename) {
     // strdup() makes a copy of the given string, allocating the required memory and assuming you will free() that memory
     E.filename = strdup(filename);
 
+    // we set the syntax highlighting here based on what kind of file was opened
+    editorSelectSyntaxHighlight();
+
     FILE *fp = fopen(filename, "r");
     if (!fp) die ("fopen");
 
@@ -571,6 +639,8 @@ void editorSave(void) {
             editorSetStatusMessage("Save cancelled");
             return;
         }
+        // we set the syntax highlighting again here in case the file didn't have a name before, or it was changed in the editing process
+        editorSelectSyntaxHighlight();
     }
 
     int len;
@@ -824,7 +894,7 @@ void editorDrawStatusBar(struct abuf *ab) {
     char status[80], rstatus[80];
     int len = snprintf(status, sizeof(status), "%.20s - %d lines %s", E.filename ? E.filename : "[No Name]", E.numrows, E.dirty ? "(modified)" : "");
     // the current line is stored in E.cy and we add 1 to that since E.cy is 0-indexed
-    int rlen = snprintf(rstatus, sizeof(rstatus), "%d/%d", E.cy + 1, E.numrows);
+    int rlen = snprintf(rstatus, sizeof(rstatus), "%s | %d/%d", E.syntax ? E.syntax->filetype : "no ft", E.cy + 1, E.numrows);
     if (len > E.screencols) len = E.screencols;
     abAppend(ab, status, len);
     // after printing the first status string we print spaces until we get to the point where if we printed the second status string, it would end up right against the edge of the screen. That would be when E.screencols - len is equal to the length of the second status string
@@ -1093,7 +1163,7 @@ void editorProcessKeypress(void) {
 
 /*** init ***/
 
-void initEditor() {
+void initEditor(void) {
     E.cx = 0;
     E.cy = 0;
     E.rx = 0;
@@ -1105,6 +1175,7 @@ void initEditor() {
     E.filename = NULL; // this will stay NULL if we run the program without arguments (meaning a file isn't opened)
     E.statusmsg[0] = '\0'; // initialized to an empty string so no message will be displayed by default
     E.statusmsg_time = 0; // will contain a timestamp when we set a status message
+    E.syntax = NULL; // when set to null, it means there is no filetype for the current file, and no syntax highlighting should be done
 
     if (getWindowSize(&E.screenrows, &E.screencols) == -1) die("getWindowSize");
     // we decrement E.screenrows so that editorDrawRows() doesn't try to draw a line of text at the bottom of the screen
