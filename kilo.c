@@ -11,7 +11,7 @@
 #include <stdarg.h> // gives us va_end(), va_start(), va_list
 #include <stdio.h> // gives us: FILE, fopen(), getline(), perror(), printf(), snprintf(), sscanf(), vsnprintf()
 #include <stdlib.h> // gives us: atexit(), exit(), free(), malloc(), realloc()
-#include <string.h> // gives us: memcpy(), memmove(), memset(), strerror(), strlen(), strdup(), strstr()
+#include <string.h> // gives us: memcpy(), memmove(), memset(), strchr(), strdup(), strerror(), strlen(), strstr()
 #include <sys/ioctl.h> // gives us: icoctl(), TIOCGWINSZ, struct winsize
 #include <sys/types.h> // gives us: ssize_t
 #include <termios.h>  // gives us: struct termios, tcgetattr(), tcsetattr(), ECHO, ICANON, ICRNL, IXTEN, ISIG, IXON, TCSAFLUSH, and also BRKINT, INPCK, ISTRIP, and CS8. also VMIN and VTIME
@@ -47,7 +47,8 @@ enum editorKey {
 // here we'll have each value in the hl array corespond to a character in render, and it will tell us whether that character is part of a string, comment, number, etc. and this enum will contain the possible values hl can contain
 enum editorHighlight {
     HL_NORMAL = 0,
-    HL_NUMBER
+    HL_NUMBER,
+    HL_MATCH
 };
 
 /*** data ***/
@@ -246,6 +247,11 @@ int getWindowSize(int *rows, int *cols) {
 
 /*** syntax highlighting ***/
 
+int is_separator(int c) {
+    // strchr() looks for the first occurrence of a character in a string, then returns a pointer to the matching character in the string. if the string doesn't contain the character, it returns NULL
+    return isspace(c) || c == '\0' || strchr(",.()+-/*=~%<>[]", c) != NULL;
+}
+
 void editorUpdateSyntax(erow *row) {
     // first we realloc() the needed memory, since the row might be bigger than the last time we highlighted it, or it could be a new row
     // // note that the size of the hl array is the same as the size of the render array, so we use rsize as the amount of memory to allocate
@@ -253,18 +259,37 @@ void editorUpdateSyntax(erow *row) {
     // we use memset to set all characters to HL_NORMAL by default, before looping through the characters and setting the digits to HL_NUMBER
     memset(row->hl, HL_NORMAL, row->rsize);
 
-    int i;
-    for (i = 0; i < row->rsize; i++) {
-        if (isdigit(row->render[i])) {
+    // we initialize prev_sep to 1 (meaning true) because we consider the beginning of hte line to be a separator. without this, numbers at the very beginning of the line wouldn't be highlighted
+    int prev_sep = 1;
+
+    // changing this for-loop to a while-loop allows us to consume multiple characters in each iteration, though we'll still only consume one character a time when processing numbers
+    int i = 0;
+    while (i < row->rsize) {
+        char c = row->render[i];
+        // prev_hl is set to the highlight type of the previous character
+        unsigned char prev_hl = (i > 0) ? row->hl[i - 1] : HL_NORMAL;
+
+        // to highlight a digit with HL_NUMBER we now require the previous character to be a separator, or to also be highlighted with HL_NUMBER
+        // we're also accounting for decimals here by highlighting a '.' that comes after a character we just highlighted as a number
+        if (isdigit(c) && (prev_sep || prev_hl == HL_NUMBER) || (c == '.' && prev_hl == HL_NUMBER)) {
             row->hl[i] = HL_NUMBER;
+            // when we decide to highlight the current character a certain way, we increment i to "consume" that character, set prev_sep to 0 to indicate that we're in the middle of highlighting something, and then continue the loop
+            i++;
+            prev_sep = 0;
+            continue;
         }
+
+        // if we end up not highlighting the previous character, then we end up here where we set prev_sep according to whether the current character is a separator and increment i to consume the character. the memset() we did at the top of the function means that an unhighlighted character will have a value of HL_NORMAL in hl
+        prev_sep = is_separator(c);
+        i++;
     }
 }
 
 int editorSyntaxToColor(int hl) {
     switch (hl) {
         // we're handling HL_NORMAL separately so we don't include it here
-        case HL_NUMBER: return 32; // any color will be rendered blue
+        case HL_NUMBER: return 32; // any number will be rendered green
+        case HL_MATCH: return 34; // any match to a search query will be rendered blue
         default: return 37; // anything else will be rendered white
     }
 }
@@ -586,6 +611,17 @@ void editorFindCallback(char *query, int key) {
     static int last_match = -1;
     // direction will store the direction of the search, 1 for forwards and -1 for backwards
     static int direction = 1;
+
+    static int saved_hl_line;
+    // here we restore hl to the contents of saved_hl
+    static char *saved_hl = NULL; // save_hl is a dynamically allocated array which points to NULL when there is nothing to restore
+
+    if (saved_hl) {
+        // if there is anything to restore, we memcpy() it to the saved line's hl and then deallocate saved_hl and set it back to NULL
+        memcpy(E.row[saved_hl_line].hl, saved_hl, E.row[saved_hl_line].rsize);
+        free(saved_hl);
+        saved_hl = NULL;
+    }
     
     // we always reset last_match to -1 unless an arrow key was pressed, so we only advanced to the next or previous match when that happens. direction is also always set to 1 unless the left or up keys are pressed. so we always search forward unless the user specifies otherwise
     if (key == '\r' || key == '\x1b') {
@@ -626,6 +662,14 @@ void editorFindCallback(char *query, int key) {
 
             // the last thing we do is set E.rowoff so that we're at the very bottom of the file, which will cause editorScroll() to scroll up at the next screen refresh so that the matching line will be at the very top of the screen. This will make it so the user doesn't have to look all over the screen to find where their cursor jumped or where the matching line is
             E.rowoff = E.numrows;
+
+            // save_hl_line is another static variable we use to know which line's hl needs to be restored
+            saved_hl_line = current;
+            // here's we'll save the original contents of hl in a static variable named saved_hl
+            saved_hl = malloc(row->rsize);
+            memcpy(saved_hl, row->hl, row->rsize);
+            // we memset() the matched substring to HL_MATCH in our search code here. match - row->render is the index of the render of the match, so we use that as our index into hl
+            memset(&row->hl[match - row->render], HL_MATCH, strlen(query));
             break;
         }
     }
@@ -738,7 +782,7 @@ void editorDrawRows(struct abuf *ab) {
             unsigned char *hl = &E.row[filerow].hl[E.coloff];
             int current_color = -1; // we set this to -1 when we want the default text color, otherwise it's set to the value editorSyntaxToColor() last returned
             int j;
-            // no longer up to date comment // we loop through the characters here and use isdigit() to check if a character is a number, if so then we precede it with the <esc>[32m escape sequence to make it blue, then follow that with the escape sequence for the default color, <esc>[39m. the m here is the same argument we used to invert colors in the status bar
+            // no longer up to date comment // we loop through the characters here and use isdigit() to check if a character is a number, if so then we precede it with the <esc>[32m escape sequence to make it green, then follow that with the escape sequence for the default color, <esc>[39m. the m here is the same argument we used to invert colors in the status bar
             // for each character we check if it's HL_NORMAL (where we'd use the default color) or something else. if it's something else then we use snprintf() to write the escape sequence into a buffer which we pass to abAppend() before appending the actual character
             for (j = 0; j < len; j++) {
                 if (hl[j] == HL_NORMAL) {
