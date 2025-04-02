@@ -11,7 +11,7 @@
 #include <stdarg.h> // gives us va_end(), va_start(), va_list
 #include <stdio.h> // gives us: FILE, fopen(), getline(), perror(), printf(), snprintf(), sscanf(), vsnprintf()
 #include <stdlib.h> // gives us: atexit(), exit(), free(), malloc(), realloc()
-#include <string.h> // gives us: memcpy(), memmove(), memset(), strchr(), strcmp(), strdup(), strerror(), strlen(), strrchr(), strstr()
+#include <string.h> // gives us: memcpy(), memmove(), memset(), strchr(), strcmp(), strdup(), strerror(), strlen(), strncmp(), strrchr(), strstr()
 #include <sys/ioctl.h> // gives us: icoctl(), TIOCGWINSZ, struct winsize
 #include <sys/types.h> // gives us: ssize_t
 #include <termios.h>  // gives us: struct termios, tcgetattr(), tcsetattr(), ECHO, ICANON, ICRNL, IXTEN, ISIG, IXON, TCSAFLUSH, and also BRKINT, INPCK, ISTRIP, and CS8. also VMIN and VTIME
@@ -47,6 +47,9 @@ enum editorKey {
 // here we'll have each value in the hl array corespond to a character in render, and it will tell us whether that character is part of a string, comment, number, etc. and this enum will contain the possible values hl can contain
 enum editorHighlight {
     HL_NORMAL = 0,
+    HL_COMMENT,
+    HL_KEYWORD1,
+    HL_KEYWORD2,
     HL_STRING,
     HL_NUMBER,
     HL_MATCH
@@ -60,6 +63,8 @@ enum editorHighlight {
 struct editorSyntax {
     char *filetype; // this will hold the name of the filetype displayed to the user in the status bar
     char **filematch; // this will be an array of strings where each string contains a pattern to match a filename against. if the filename matches, then the file will be recognized as having that filetype
+    char **keywords; // this will be a NULL-terminated array of strings, each string containing a keyword
+    char *singleline_comment_start; // we'll let each language specify its own pattern for single-line comments, because they can differ so much between languages
     int flags; // this will be a bit field that will contain flags for whether to highlight numbers and whether to highlight strings for that filetype
 };
 
@@ -95,12 +100,19 @@ struct editorConfig E;
 /*** filetypes ***/
 
 char *C_HL_extensions[] = { ".c", ".h", ".cpp", NULL };
+char *C_HL_keywords[] = {
+    "switch", "if", "while", "for", "break", "continue", "return", "else", "struct", "union", "typedef", "static", "enum","class", "case",
+
+    "int|", "long|", "double|", "float|", "char|", "unsigned|", "signed|", "void|", NULL
+};
 
 // HLDB here is our "highlight database"
 struct editorSyntax HLDB[] = {
     {
         "c",
         C_HL_extensions,
+        C_HL_keywords,
+        "//",
         HL_HIGHLIGHT_NUMBERS | HL_HIGHLIGHT_STRINGS
         // the above bit flags will be turned on when highlighting C files
     },
@@ -290,6 +302,14 @@ void editorUpdateSyntax(erow *row) {
     // if no filetype is set, we return immediately after memset()ing the entire line to HL_NORMAL
     if (E.syntax == NULL) return;
 
+    // we make keywords an alias for E.syntax->keywords for similar reasons to doing so for scs
+    char **keywords = E.syntax->keywords;
+
+    // we make scs an alias for E.syntax->singleline_comment_start for easier typing and better readability
+    char *scs = E.syntax->singleline_comment_start;
+    // we set scs_len to the length of the string, or 0 if the string is NULL. this lets us use scs_len as a boolean to know whether we should highlight single-line comments
+    int scs_len = scs ? strlen(scs) : 0;
+
     // we initialize prev_sep to 1 (meaning true) because we consider the beginning of hte line to be a separator. without this, numbers at the very beginning of the line wouldn't be highlighted
     int prev_sep = 1;
     // in_string will track whether we're currently inside of a string and allow us to keep highlighting the current character as a string until we hit the closing quote
@@ -301,6 +321,16 @@ void editorUpdateSyntax(erow *row) {
         char c = row->render[i];
         // prev_hl is set to the highlight type of the previous character
         unsigned char prev_hl = (i > 0) ? row->hl[i - 1] : HL_NORMAL;
+
+        // this if-statement checks scs_len and also makes sure we're not in a string, since we're placing this code above the string highlighting code, and order matters a lot for highlighting purposes
+        if (scs_len && !in_string) {
+            // this if statement checks if the character is the start of a single-line comment
+            if (!strncmp(&row->render[i], scs, scs_len)) {
+                // if the character is the start of a single-line comment, then we memset() the rest of the line with HL_COMMENT and break out of the syntax highlighting loop, and the line is done being highlighted
+                memset(&row->hl[i], HL_COMMENT, row->rsize - i);
+                break;
+            }
+        }
 
         if (E.syntax->flags & HL_HIGHLIGHT_STRINGS) {
             // if in_string is set then we know the current character can be highlighted with HL_STRING
@@ -346,6 +376,32 @@ void editorUpdateSyntax(erow *row) {
                 continue;
             }
         }
+
+        // keywords require a separator before and after the word to avoid highlighting the middle of certain words etc, so we check that a separator comes before the word here
+        if (prev_sep) {
+            int j;
+            for (j = 0; keywords[j]; j++) {
+                int klen = strlen(keywords[j]); // here we store the length of the keyword
+                int kw2 = keywords[j][klen - 1] == '|'; // here we store whether it's a secondary keyword
+                if (kw2) klen--; // if it's a secondary keyword, we decrement klen to account for the extraneous | pipe character
+
+                // we use strncmp() to check if the keyword exists at our current position in the text, and we also check to see if a separator comes after the keyword. because \0 is considered a separator, this also works if the keyword is at the very end of the line
+                if (!strncmp(&row->render[i], keywords[j], klen) && is_separator(row->render[i + klen])) {
+                    // if all those conditions are satisfied, then we use memset() to highlight the whole keyword at once, with color depending on the value of kw2
+                    memset(&row->hl[i], kw2 ? HL_KEYWORD2 : HL_KEYWORD1, klen);
+                    // then we consume the entire keyword, incrementing i by its length
+                    i += klen;
+                    break; // we break instead of continuing because we are in an inner loop
+                }
+            }
+
+            // we check if the loop was broken out of by seeing if it got to the terminating NULL value, and if so then we continue
+            if (keywords[j] != NULL) {
+                prev_sep = 0;
+                continue;
+            }
+        }
+
         // if we end up not highlighting the previous character, then we end up here where we set prev_sep according to whether the current character is a separator and increment i to consume the character. the memset() we did at the top of the function means that an unhighlighted character will have a value of HL_NORMAL in hl
         prev_sep = is_separator(c);
         i++;
@@ -355,6 +411,9 @@ void editorUpdateSyntax(erow *row) {
 int editorSyntaxToColor(int hl) {
     switch (hl) {
         // we're handling HL_NORMAL separately so we don't include it here
+        case HL_COMMENT: return 36; // comments will be rendered in cyan
+        case HL_KEYWORD1: return 33; // keywords defined here will render yellow
+        case HL_KEYWORD2: return 31; // keywords defined here will render red
         case HL_STRING: return 35; // any string enclosed by quotes will be rendered magenta
         case HL_NUMBER: return 32; // any number will be rendered green
         case HL_MATCH: return 34; // any match to a search query will be rendered blue
