@@ -47,11 +47,13 @@ enum editorKey {
 // here we'll have each value in the hl array corespond to a character in render, and it will tell us whether that character is part of a string, comment, number, etc. and this enum will contain the possible values hl can contain
 enum editorHighlight {
     HL_NORMAL = 0,
+    HL_STRING,
     HL_NUMBER,
     HL_MATCH
 };
 
 #define HL_HIGHLIGHT_NUMBERS (1<<0)
+#define HL_HIGHLIGHT_STRINGS (1<<1)
 
 /*** data ***/
 
@@ -99,7 +101,8 @@ struct editorSyntax HLDB[] = {
     {
         "c",
         C_HL_extensions,
-        HL_HIGHLIGHT_NUMBERS
+        HL_HIGHLIGHT_NUMBERS | HL_HIGHLIGHT_STRINGS
+        // the above bit flags will be turned on when highlighting C files
     },
 };
 
@@ -289,6 +292,8 @@ void editorUpdateSyntax(erow *row) {
 
     // we initialize prev_sep to 1 (meaning true) because we consider the beginning of hte line to be a separator. without this, numbers at the very beginning of the line wouldn't be highlighted
     int prev_sep = 1;
+    // in_string will track whether we're currently inside of a string and allow us to keep highlighting the current character as a string until we hit the closing quote
+    int in_string = 0;
 
     // changing this for-loop to a while-loop allows us to consume multiple characters in each iteration, though we'll still only consume one character a time when processing numbers
     int i = 0;
@@ -296,6 +301,38 @@ void editorUpdateSyntax(erow *row) {
         char c = row->render[i];
         // prev_hl is set to the highlight type of the previous character
         unsigned char prev_hl = (i > 0) ? row->hl[i - 1] : HL_NORMAL;
+
+        if (E.syntax->flags & HL_HIGHLIGHT_STRINGS) {
+            // if in_string is set then we know the current character can be highlighted with HL_STRING
+            if (in_string) {
+                row->hl[i] = HL_STRING;
+                // here we account for escape quotes, because in most programming languages, \' and \" don't close strings
+                if (c == '\\' && i + 1 < row->rsize) {
+                    row->hl[i + 1] = HL_STRING;
+                    i += 2;
+                    continue;
+                }
+                // we set in_string to a double or single quote so that we know which one closes the string, so if we come across the closing quote, we set to in_string to 0
+                if (c == in_string) in_string = 0;
+                // we increment i to "consume" the current character
+                i++;
+                // we consider the closing quote to be a separator so we set prev_sep to 1
+                prev_sep = 1;
+                // then we continue out of the current loop iteration
+                continue;
+            } else {
+                // if we're not currently in a string, then we have to check if we're at the beginning of one by checking for a double or single quote
+                if (c == '"' || c == '\'') {
+                    // if we find that we are in a string, we store the quote in in_string
+                    in_string = c;
+                    // then we highlight it with HL_STRING
+                    row->hl[i] = HL_STRING;
+                    // then we "consume" it by iterating i
+                    i++;
+                    continue;
+                }
+            }
+        }
 
         // to highlight a digit with HL_NUMBER we now require the previous character to be a separator, or to also be highlighted with HL_NUMBER
         // we're also accounting for decimals here by highlighting a '.' that comes after a character we just highlighted as a number
@@ -318,6 +355,7 @@ void editorUpdateSyntax(erow *row) {
 int editorSyntaxToColor(int hl) {
     switch (hl) {
         // we're handling HL_NORMAL separately so we don't include it here
+        case HL_STRING: return 35; // any string enclosed by quotes will be rendered magenta
         case HL_NUMBER: return 32; // any number will be rendered green
         case HL_MATCH: return 34; // any match to a search query will be rendered blue
         default: return 37; // anything else will be rendered white
