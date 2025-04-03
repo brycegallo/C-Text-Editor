@@ -952,7 +952,22 @@ void editorDrawRows(struct abuf *ab) {
             // no longer up to date comment // we loop through the characters here and use isdigit() to check if a character is a number, if so then we precede it with the <esc>[32m escape sequence to make it green, then follow that with the escape sequence for the default color, <esc>[39m. the m here is the same argument we used to invert colors in the status bar
             // for each character we check if it's HL_NORMAL (where we'd use the default color) or something else. if it's something else then we use snprintf() to write the escape sequence into a buffer which we pass to abAppend() before appending the actual character
             for (j = 0; j < len; j++) {
-                if (hl[j] == HL_NORMAL) {
+                // first we'll handle the conversion of non-printable characters to printable ones to handle edge cases, like a user opening up a file that wouldn't normally be expected in a text editor, like the executable for this program for example
+                // first we check if the current character is a control character
+                if (iscntrl(c[j])) {
+                    // if the current character is a control character, we translate it into a printable character by adding its value to '@' or '?' depending on if it's in the alphabetic range or not
+                    char sym = (c[j] <= 26) ? '@' + c[j] : '?';
+                    // we use <esc>[7m to switch to inverted colors before printing the translated symbol
+                    abAppend(ab, "\x1b[7m", 4);
+                    abAppend(ab, &sym, 1);
+                    // we use <esc>[m to turn off inverted colors again, but this also turns off all text formatting, so we need to print the escape sequence for the corrent current color afterwards
+                    abAppend(ab, "\x1b[m", 3);
+                    if (current_color != -1) {
+                        char buf[16];
+                        int clen = snprintf(buf, sizeof(buf), "\x1b[%dm", current_color);
+                        abAppend(ab, buf, clen);
+                    }
+                } else if (hl[j] == HL_NORMAL) {
                     if (current_color != -1) {
                         // when we go from highlighted text back to HL_NORMAL we print out the normal color escape sequence and set current_color to -1
                         abAppend(ab, "\x1b[39m", 5);
