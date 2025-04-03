@@ -48,6 +48,7 @@ enum editorKey {
 enum editorHighlight {
     HL_NORMAL = 0,
     HL_COMMENT,
+    HL_MLCOMMENT,
     HL_KEYWORD1,
     HL_KEYWORD2,
     HL_STRING,
@@ -65,16 +66,20 @@ struct editorSyntax {
     char **filematch; // this will be an array of strings where each string contains a pattern to match a filename against. if the filename matches, then the file will be recognized as having that filetype
     char **keywords; // this will be a NULL-terminated array of strings, each string containing a keyword
     char *singleline_comment_start; // we'll let each language specify its own pattern for single-line comments, because they can differ so much between languages
+    char *multiline_comment_start;
+    char *multiline_comment_end;
     int flags; // this will be a bit field that will contain flags for whether to highlight numbers and whether to highlight strings for that filetype
 };
 
 // erow here stands for "editor row" and stores a line of text as a pointer to the dynamically-allocated character data and a length. the typedef lets us refer to the type as erow instead of struct erow
 typedef struct erow {
+    int idx; // this will allow each erow to know its own index within the file, which will alow it to examine the previous row's hl_open_comment value
     int size;
     int rsize;
     char *chars;
     char *render;
     unsigned char *hl; //hl here stands for highlight. this is an array of unsigned char values, meaning integers in the range 0 to 255
+    int hl_open_comment; // boolean
 } erow;
 
 // a global struct that will contain our editor state
@@ -112,7 +117,7 @@ struct editorSyntax HLDB[] = {
         "c",
         C_HL_extensions,
         C_HL_keywords,
-        "//",
+        "//", "/*", "*/",
         HL_HIGHLIGHT_NUMBERS | HL_HIGHLIGHT_STRINGS
         // the above bit flags will be turned on when highlighting C files
     },
@@ -307,13 +312,21 @@ void editorUpdateSyntax(erow *row) {
 
     // we make scs an alias for E.syntax->singleline_comment_start for easier typing and better readability
     char *scs = E.syntax->singleline_comment_start;
+    // we now do the same for multi-line comment start and end
+    char *mcs = E.syntax->multiline_comment_start;
+    char *mce = E.syntax->multiline_comment_end;
+
     // we set scs_len to the length of the string, or 0 if the string is NULL. this lets us use scs_len as a boolean to know whether we should highlight single-line comments
     int scs_len = scs ? strlen(scs) : 0;
+    int mcs_len = mcs ? strlen(mcs) : 0;
+    int mce_len = mce ? strlen(mce) : 0;
 
     // we initialize prev_sep to 1 (meaning true) because we consider the beginning of hte line to be a separator. without this, numbers at the very beginning of the line wouldn't be highlighted
     int prev_sep = 1;
     // in_string will track whether we're currently inside of a string and allow us to keep highlighting the current character as a string until we hit the closing quote
     int in_string = 0;
+    // we initiliaze in_comment here to true if the previous row has an unclosed multi-line comment. if so, then the current row will start out being highlighted as a multi-line comment
+    int in_comment = (row->idx > 0 && E.row[row->idx - 1].hl_open_comment); // will track if we're in a multi-line comment, not needed for single line comments
 
     // changing this for-loop to a while-loop allows us to consume multiple characters in each iteration, though we'll still only consume one character a time when processing numbers
     int i = 0;
@@ -323,12 +336,46 @@ void editorUpdateSyntax(erow *row) {
         unsigned char prev_hl = (i > 0) ? row->hl[i - 1] : HL_NORMAL;
 
         // this if-statement checks scs_len and also makes sure we're not in a string, since we're placing this code above the string highlighting code, and order matters a lot for highlighting purposes
-        if (scs_len && !in_string) {
+        // we add && !in_comment to make sure that single-line comments are not recognized within multi-line comments
+        if (scs_len && !in_string && !in_comment) {
             // this if statement checks if the character is the start of a single-line comment
             if (!strncmp(&row->render[i], scs, scs_len)) {
                 // if the character is the start of a single-line comment, then we memset() the rest of the line with HL_COMMENT and break out of the syntax highlighting loop, and the line is done being highlighted
                 memset(&row->hl[i], HL_COMMENT, row->rsize - i);
                 break;
+            }
+        }
+
+        // both mcs and mce must be non-NULL strings of length greater than 0 to trigger this if-statement and turn on multi-comment highlighting, and we also havet to be sure we're not in a string because /* in a string won't start a comment in most (all) languages
+        if (mcs_len && mce_len && !in_string) {
+            if (in_comment) {
+                // if we're currently in a multi-line comment then we can safely highlight the current character with HL_MLCOMMENT
+                row->hl[i] = HL_MLCOMMENT;
+                // then we check if we're at the end of a multi-line comment by using strncmp() with mce
+                if (!strncmp(&row->render[i], mce, mce_len)) {
+                    // if we are at the end of a multi-line comment then we highlight the whole mce string with HL_MLCOMMENT
+                    memset(&row->hl[i], HL_MLCOMMENT, mce_len);
+                    // then we increment i by the length of the comment to "consume" it
+                    i += mce_len;
+                    // we set in_comment to false
+                    in_comment = 0;
+                    // we consider */ that marks the end of a multi-line comment to be a separator and continue
+                    prev_sep = 1;
+                    continue;
+                } else {
+                    // if we're not at the end of the multi-line comment then we increment i by 1 to "consume" the character and continue
+                    i++;
+                    continue;
+                }
+            // if we're not currently in a multi-line comment then we use strncmp() with mcs to see if we're at the beginning of one
+            } else if (!strncmp(&row->render[i], mcs, mcs_len)) {
+                // if we're at the beginning of a multi-line comment then we use memset() to highlight the whole mcs string with HL_MLCOMMENT
+                memset(&row->hl[i], HL_MLCOMMENT, mcs_len);
+                // then we "consume" the mcs string by incrementing i by the mcs string's length
+                i += mcs_len;
+                // then we set in_comment to true so we can end up in the first clause of this if-statement for the next character
+                in_comment = 1;
+                continue;
             }
         }
 
@@ -406,12 +453,22 @@ void editorUpdateSyntax(erow *row) {
         prev_sep = is_separator(c);
         i++;
     }
+
+    int changed = (row->hl_open_comment != in_comment);
+    // here we set the current row's hl_open_comment value to whatever in_comment was left in after the entire row was processed
+    row->hl_open_comment = in_comment;
+    // here we check if the value of this line's hl_open_comment variable changed
+    if (changed && row->idx + 1 < E.numrows) {
+        // if hl_open_comment changed then the change will propagate throughout the file until one of them is unchanged, at which point we'd know that all the lines after that one are unchanged as well
+        editorUpdateSyntax(&E.row[row->idx + 1]);
+    }
 }
 
 int editorSyntaxToColor(int hl) {
     switch (hl) {
         // we're handling HL_NORMAL separately so we don't include it here
-        case HL_COMMENT: return 36; // comments will be rendered in cyan
+        case HL_COMMENT:
+        case HL_MLCOMMENT: return 36; // both single and multi-line comments will be rendered in cyan
         case HL_KEYWORD1: return 33; // keywords defined here will render yellow
         case HL_KEYWORD2: return 31; // keywords defined here will render red
         case HL_STRING: return 35; // any string enclosed by quotes will be rendered magenta
@@ -529,6 +586,11 @@ void editorInsertRow(int at, char *s, size_t len) {
 
     E.row = realloc(E.row, sizeof(erow) * (E.numrows + 1));
     memmove(&E.row[at + 1], &E.row[at], sizeof(erow) * (E.numrows - at));
+    // we want to the idx of each row whenever a row is inserted into file
+    for (int j = at + 1; j <= E.numrows; j++) E.row[j].idx++;
+
+    // we initialize idx to the row's index in the file at the time that it's inserted
+    E.row[at].idx = at;
 
     // int at = E.numrows;
     E.row[at].size = len;
@@ -540,6 +602,7 @@ void editorInsertRow(int at, char *s, size_t len) {
     E.row[at].rsize = 0;
     E.row[at].render = NULL;
     E.row[at].hl = NULL;
+    E.row[at].hl_open_comment = 0;
     editorUpdateRow(&E.row[at]);
 
     E.numrows++;
@@ -560,6 +623,8 @@ void editorDelRow(int at) {
     editorFreeRow(&E.row[at]);
     // then we use memmove() to overwrite the deleted row struct with the rest of the rows that come after it
     memmove(&E.row[at], &E.row[at + 1], sizeof(erow) * (E.numrows - at - 1));
+    // we want to the idx of each row whenever a row is deleted from file
+    for (int j = at; j < E.numrows - 1; j++) E.row[j].idx--;
     // then we decrement rows and increment the dirty flag
     E.numrows--;
     E.dirty++;
